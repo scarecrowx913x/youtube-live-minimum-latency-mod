@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.6
+// @version      0.1.0-mod.7
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -300,52 +300,73 @@
     return Array.isArray(rates) ? rates : [];
   }
 
-  function getPlaybackRate(player, video) {
+  function getPlayerPlaybackRate(player) {
     const playerRate = Number(callPlayer(player, 'getPlaybackRate'));
-    if (Number.isFinite(playerRate) && playerRate > 0) {
-      return playerRate;
+    return Number.isFinite(playerRate) && playerRate > 0 ? playerRate : null;
+  }
+
+  function getActualPlaybackRate(video) {
+    const videoRate = Number(video?.playbackRate);
+    return Number.isFinite(videoRate) && videoRate > 0 ? videoRate : CONFIG.normalRate;
+  }
+
+  function setVideoPlaybackRate(video, rate) {
+    if (!video) {
+      return false;
     }
 
-    return Number(video?.playbackRate) || CONFIG.normalRate;
+    try {
+      video.playbackRate = rate;
+    } catch (error) {
+      log('video.playbackRate assignment failed', error);
+    }
+
+    // Some pages wrap instance properties. Call the native setter too, just in case.
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
+      descriptor?.set?.call(video, rate);
+    } catch (error) {
+      log('native playbackRate setter failed', error);
+    }
+
+    return Math.abs(getActualPlaybackRate(video) - rate) <= 0.01;
   }
 
   function setPlaybackRate(player, video, rate) {
     // Some YouTube player methods return undefined even when the operation succeeds.
-    // Do not trust the return value; verify the actual playback rate after attempting both routes.
+    // Do not trust the return value; verify the actual video playback rate.
     callPlayer(player, 'setPlaybackRate', rate);
+    setVideoPlaybackRate(video, rate);
 
-    if (video) {
-      try {
-        video.playbackRate = rate;
-      } catch (error) {
-        log('video.playbackRate failed', error);
-      }
+    return Math.abs(getActualPlaybackRate(video) - rate) <= 0.01;
+  }
+
+  function enforcePlaybackRate(player, video, rate) {
+    if (Math.abs(getActualPlaybackRate(video) - rate) <= 0.01) {
+      return true;
     }
 
-    const playerRate = getPlaybackRate(player, video);
-    const videoRate = Number(video?.playbackRate);
-
-    return (
-      Math.abs(playerRate - rate) <= 0.01 ||
-      Math.abs(videoRate - rate) <= 0.01
-    );
+    return setPlaybackRate(player, video, rate);
   }
 
   function startAcceleration(player, video, reason) {
     if (state.accelerating) {
-      return;
+      return enforcePlaybackRate(player, video, CONFIG.catchUpRate);
     }
 
     if (setPlaybackRate(player, video, CONFIG.catchUpRate)) {
       state.accelerating = true;
       log('accelerating', reason);
-    } else {
-      log('failed to accelerate', reason);
+      return true;
     }
+
+    log('failed to accelerate', reason);
+    return false;
   }
 
   function stopAcceleration(player, video, reason) {
     if (!state.accelerating) {
+      enforcePlaybackRate(player, video, CONFIG.normalRate);
       return;
     }
 
@@ -369,12 +390,17 @@
 
     if (!state.accelerating) {
       if (status.bufferSec > status.threshold.bufferSec) {
-        startAcceleration(player, video, {
+        const changed = startAcceleration(player, video, {
           bufferSec: status.bufferSec,
           threshold: status.threshold,
           fallback: 'buffer-only',
         });
-        publishStatus({ ...status, reason: 'accelerating-started-buffer-fallback' });
+        publishStatus({
+          ...status,
+          reason: changed ? 'accelerating-started-buffer-fallback' : 'accelerating-failed-buffer-fallback',
+          actualPlaybackRateAfter: getActualPlaybackRate(video),
+          playerPlaybackRateAfter: getPlayerPlaybackRate(player),
+        });
         return;
       }
 
@@ -388,11 +414,22 @@
         threshold: status.threshold,
         fallback: 'buffer-only',
       });
-      publishStatus({ ...status, reason: 'acceleration-stopped-buffer-fallback' });
+      publishStatus({
+        ...status,
+        reason: 'acceleration-stopped-buffer-fallback',
+        actualPlaybackRateAfter: getActualPlaybackRate(video),
+        playerPlaybackRateAfter: getPlayerPlaybackRate(player),
+      });
       return;
     }
 
-    publishStatus({ ...status, reason: 'accelerating-continued-buffer-fallback' });
+    const enforced = enforcePlaybackRate(player, video, CONFIG.catchUpRate);
+    publishStatus({
+      ...status,
+      reason: enforced ? 'accelerating-continued-buffer-fallback' : 'accelerating-rate-enforce-failed-buffer-fallback',
+      actualPlaybackRateAfter: getActualPlaybackRate(video),
+      playerPlaybackRateAfter: getPlayerPlaybackRate(player),
+    });
   }
 
   function tick() {
@@ -424,15 +461,17 @@
     const bufferSec = getBufferedAheadSec(video, stats);
     const threshold = getThreshold(stats);
     const availableRates = getAvailablePlaybackRates(player);
-    const playbackRate = getPlaybackRate(player, video);
+    const actualPlaybackRate = getActualPlaybackRate(video);
+    const playerPlaybackRate = getPlayerPlaybackRate(player);
     const status = {
       reason: 'checking',
       accelerating: state.accelerating,
       latencySec,
       bufferSec,
       threshold,
-      playbackRate,
-      videoPlaybackRate: video.playbackRate,
+      playbackRate: actualPlaybackRate,
+      videoPlaybackRate: actualPlaybackRate,
+      playerPlaybackRate,
       availableRates,
       statsLive: stats?.live,
       latencyClass: stats?.latency_class,
@@ -459,15 +498,20 @@
     }
 
     // Avoid overriding a custom speed chosen by the viewer.
-    if (!state.accelerating && Math.abs(playbackRate - CONFIG.normalRate) > 0.01) {
+    if (!state.accelerating && Math.abs(actualPlaybackRate - CONFIG.normalRate) > 0.01) {
       publishStatus({ ...status, reason: 'manual-playback-rate-detected' });
       return;
     }
 
     if (!state.accelerating) {
       if (latencySec > threshold.latencySec && bufferSec >= threshold.bufferSec) {
-        startAcceleration(player, video, { latencySec, bufferSec, threshold });
-        publishStatus({ ...status, reason: 'accelerating-started' });
+        const changed = startAcceleration(player, video, { latencySec, bufferSec, threshold });
+        publishStatus({
+          ...status,
+          reason: changed ? 'accelerating-started' : 'accelerating-failed',
+          actualPlaybackRateAfter: getActualPlaybackRate(video),
+          playerPlaybackRateAfter: getPlayerPlaybackRate(player),
+        });
         return;
       }
 
@@ -480,11 +524,22 @@
       bufferSec <= Math.max(CONFIG.requiredBufferFloorSec, threshold.bufferSec / 2)
     ) {
       stopAcceleration(player, video, { latencySec, bufferSec, threshold });
-      publishStatus({ ...status, reason: 'acceleration-stopped' });
+      publishStatus({
+        ...status,
+        reason: 'acceleration-stopped',
+        actualPlaybackRateAfter: getActualPlaybackRate(video),
+        playerPlaybackRateAfter: getPlayerPlaybackRate(player),
+      });
       return;
     }
 
-    publishStatus({ ...status, reason: 'accelerating-continued' });
+    const enforced = enforcePlaybackRate(player, video, CONFIG.catchUpRate);
+    publishStatus({
+      ...status,
+      reason: enforced ? 'accelerating-continued' : 'accelerating-rate-enforce-failed',
+      actualPlaybackRateAfter: getActualPlaybackRate(video),
+      playerPlaybackRateAfter: getPlayerPlaybackRate(player),
+    });
   }
 
   function startLoop() {
