@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.7
+// @version      0.1.0-mod.8
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -286,13 +286,26 @@
   }
 
   function getLiveLatencySec(player, video, stats) {
-    // Original-like calculation: this matches YouTube's displayed Live Latency when available.
+    // This captures a transport-ish latency that does not always include player buffer.
     const mediaReferenceLatency = getMediaReferenceLatencySec(player);
     if (Number.isFinite(mediaReferenceLatency)) {
       return mediaReferenceLatency;
     }
 
     return getSeekableLatencyFallbackSec(video, stats);
+  }
+
+  function getEffectiveLatencySec(latencySec, bufferSec) {
+    // YouTube's Stats for nerds Live Latency is often close to media reference latency + buffer health.
+    if (Number.isFinite(latencySec) && Number.isFinite(bufferSec)) {
+      return latencySec + bufferSec;
+    }
+
+    if (Number.isFinite(latencySec)) {
+      return latencySec;
+    }
+
+    return null;
   }
 
   function getAvailablePlaybackRates(player) {
@@ -459,6 +472,7 @@
 
     const latencySec = getLiveLatencySec(player, video, stats);
     const bufferSec = getBufferedAheadSec(video, stats);
+    const effectiveLatencySec = getEffectiveLatencySec(latencySec, bufferSec);
     const threshold = getThreshold(stats);
     const availableRates = getAvailablePlaybackRates(player);
     const actualPlaybackRate = getActualPlaybackRate(video);
@@ -468,6 +482,7 @@
       accelerating: state.accelerating,
       latencySec,
       bufferSec,
+      effectiveLatencySec,
       threshold,
       playbackRate: actualPlaybackRate,
       videoPlaybackRate: actualPlaybackRate,
@@ -484,14 +499,14 @@
 
     // If live latency cannot be obtained, use Buffer Health as a practical fallback.
     // This follows the same spirit as the original script's buffer-based behavior for long/current streams.
-    if (latencySec == null) {
+    if (effectiveLatencySec == null) {
       handleBufferOnlyFallback(player, video, status);
       return;
     }
 
     // If the viewer is intentionally far behind the live edge, avoid fighting them.
     // Same idea as the original: apply this safety guard mainly to DVR/premiere-like playback.
-    if (stats?.live !== 'live' && latencySec >= CONFIG.maxManualLatencySec) {
+    if (stats?.live !== 'live' && effectiveLatencySec >= CONFIG.maxManualLatencySec) {
       stopAcceleration(player, video, 'manual latency assumed');
       publishStatus({ ...status, reason: 'manual-latency-assumed' });
       return;
@@ -504,8 +519,13 @@
     }
 
     if (!state.accelerating) {
-      if (latencySec > threshold.latencySec && bufferSec >= threshold.bufferSec) {
-        const changed = startAcceleration(player, video, { latencySec, bufferSec, threshold });
+      if (effectiveLatencySec > threshold.latencySec && bufferSec >= threshold.bufferSec) {
+        const changed = startAcceleration(player, video, {
+          latencySec,
+          bufferSec,
+          effectiveLatencySec,
+          threshold,
+        });
         publishStatus({
           ...status,
           reason: changed ? 'accelerating-started' : 'accelerating-failed',
@@ -520,10 +540,15 @@
     }
 
     if (
-      latencySec <= threshold.latencySec ||
+      effectiveLatencySec <= threshold.latencySec ||
       bufferSec <= Math.max(CONFIG.requiredBufferFloorSec, threshold.bufferSec / 2)
     ) {
-      stopAcceleration(player, video, { latencySec, bufferSec, threshold });
+      stopAcceleration(player, video, {
+        latencySec,
+        bufferSec,
+        effectiveLatencySec,
+        threshold,
+      });
       publishStatus({
         ...status,
         reason: 'acceleration-stopped',
