@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.8
+// @version      0.1.0-mod.9
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -34,7 +34,7 @@
   const CONFIG = Object.freeze({
     normalRate: 1.0,
     catchUpRate: 1.25,
-    tickMs: 250,
+    tickMs: 500,
     maxManualLatencySec: 120,
     seekableFallbackMaxSec: 60,
     requiredBufferFloorSec: 1.0,
