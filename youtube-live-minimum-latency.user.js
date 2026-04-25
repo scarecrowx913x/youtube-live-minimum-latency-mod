@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.2
+// @version      0.1.0-mod.3
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -45,7 +45,9 @@
       low: Object.freeze({ latencySec: 6.0, bufferSec: 2.0 }),
       normal: Object.freeze({ latencySec: 12.0, bufferSec: 3.0 }),
       premiere: Object.freeze({ latencySec: 15.0, bufferSec: 3.0 }),
-      unknown: Object.freeze({ latencySec: 8.0, bufferSec: 2.5 }),
+      // YouTube may not expose latency_class through getVideoStats().
+      // For this script's purpose, unknown should behave closer to low latency than normal latency.
+      unknown: Object.freeze({ latencySec: 6.0, bufferSec: 2.0 }),
     }),
   });
 
@@ -130,7 +132,7 @@
     );
   }
 
-  function normalizeLatencyClass(latencyClass) {
+  function getLatencyClassKey(latencyClass) {
     const value = String(latencyClass || '').toLowerCase();
 
     if (value.includes('ultra')) {
@@ -149,16 +151,16 @@
   }
 
   function getThreshold(stats) {
-    const baseKey = normalizeLatencyClass(stats?.latency_class);
-    const base = CONFIG.thresholds[baseKey] || CONFIG.thresholds.unknown;
+    const thresholdKey = getLatencyClassKey(stats?.latency_class);
+    const base = CONFIG.thresholds[thresholdKey] || CONFIG.thresholds.unknown;
 
     // Important: copy the threshold object before customizing it.
     // Do not mutate CONFIG.thresholds.
-    const threshold = { ...base };
+    const threshold = { ...base, key: thresholdKey };
 
     // YouTube Premiere / live premiere often behaves differently from ordinary live streams.
     if (stats?.live === 'lp') {
-      return { ...threshold, ...CONFIG.thresholds.premiere };
+      return { ...threshold, ...CONFIG.thresholds.premiere, key: 'premiere' };
     }
 
     return threshold;
