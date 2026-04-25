@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.5
+// @version      0.1.0-mod.6
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -122,15 +122,29 @@
     return data && typeof data === 'object' ? data : null;
   }
 
+  function isStatsLiveValue(value) {
+    return value === 'live' || value === 'dvr' || value === 'lp';
+  }
+
   function isLivePlayback(player, video, stats) {
     const videoData = getVideoData(player);
 
     return Boolean(
       videoData?.isLive ||
       videoData?.isLiveContent ||
-      stats?.live ||
-      video?.duration === Infinity ||
-      video?.seekable?.length
+      isStatsLiveValue(stats?.live) ||
+      video?.duration === Infinity
+    );
+  }
+
+  function isPlainLivePlayback(player, video, stats) {
+    const videoData = getVideoData(player);
+
+    return Boolean(
+      videoData?.isLive ||
+      videoData?.isLiveContent ||
+      stats?.live === 'live' ||
+      video?.duration === Infinity
     );
   }
 
@@ -272,7 +286,7 @@
   }
 
   function getLiveLatencySec(player, video, stats) {
-    // Original-like calculation: this matches YouTube's displayed Live Latency more reliably.
+    // Original-like calculation: this matches YouTube's displayed Live Latency when available.
     const mediaReferenceLatency = getMediaReferenceLatencySec(player);
     if (Number.isFinite(mediaReferenceLatency)) {
       return mediaReferenceLatency;
@@ -296,28 +310,25 @@
   }
 
   function setPlaybackRate(player, video, rate) {
-    const availableRates = getAvailablePlaybackRates(player);
-
-    // YouTube may not list 1.25x for some live streams even when the video element accepts it.
-    // Try the player API first only when it explicitly supports the target rate.
-    if (availableRates.length === 0 || availableRates.includes(rate)) {
-      const result = callPlayer(player, 'setPlaybackRate', rate);
-
-      if (result !== undefined) {
-        return true;
-      }
-    }
+    // Some YouTube player methods return undefined even when the operation succeeds.
+    // Do not trust the return value; verify the actual playback rate after attempting both routes.
+    callPlayer(player, 'setPlaybackRate', rate);
 
     if (video) {
       try {
         video.playbackRate = rate;
-        return Math.abs(Number(video.playbackRate) - rate) <= 0.01;
       } catch (error) {
         log('video.playbackRate failed', error);
       }
     }
 
-    return false;
+    const playerRate = getPlaybackRate(player, video);
+    const videoRate = Number(video?.playbackRate);
+
+    return (
+      Math.abs(playerRate - rate) <= 0.01 ||
+      Math.abs(videoRate - rate) <= 0.01
+    );
   }
 
   function startAcceleration(player, video, reason) {
@@ -344,6 +355,44 @@
     } else {
       log('failed to return normal speed', reason);
     }
+  }
+
+  function handleBufferOnlyFallback(player, video, status) {
+    const stopBufferSec = Math.max(CONFIG.requiredBufferFloorSec, status.threshold.bufferSec);
+
+    // Buffer-only mode is mainly for ordinary live streams where getMediaReferenceTime is unavailable.
+    // Avoid applying it to DVR or live premiere, because it could override intentional seeking.
+    if (!isPlainLivePlayback(player, video, getVideoStats(player))) {
+      publishStatus({ ...status, reason: 'latency-unavailable' });
+      return;
+    }
+
+    if (!state.accelerating) {
+      if (status.bufferSec > status.threshold.bufferSec) {
+        startAcceleration(player, video, {
+          bufferSec: status.bufferSec,
+          threshold: status.threshold,
+          fallback: 'buffer-only',
+        });
+        publishStatus({ ...status, reason: 'accelerating-started-buffer-fallback' });
+        return;
+      }
+
+      publishStatus({ ...status, reason: 'latency-unavailable-buffer-below-threshold' });
+      return;
+    }
+
+    if (status.bufferSec <= stopBufferSec) {
+      stopAcceleration(player, video, {
+        bufferSec: status.bufferSec,
+        threshold: status.threshold,
+        fallback: 'buffer-only',
+      });
+      publishStatus({ ...status, reason: 'acceleration-stopped-buffer-fallback' });
+      return;
+    }
+
+    publishStatus({ ...status, reason: 'accelerating-continued-buffer-fallback' });
   }
 
   function tick() {
@@ -394,8 +443,10 @@
       seekableLatencyFallback: getSeekableLatencyFallbackSec(video, stats),
     };
 
+    // If live latency cannot be obtained, use Buffer Health as a practical fallback.
+    // This follows the same spirit as the original script's buffer-based behavior for long/current streams.
     if (latencySec == null) {
-      publishStatus({ ...status, reason: 'latency-unavailable' });
+      handleBufferOnlyFallback(player, video, status);
       return;
     }
 
