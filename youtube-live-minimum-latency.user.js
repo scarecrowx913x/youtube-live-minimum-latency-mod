@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.4
+// @version      0.1.0-mod.5
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -36,6 +36,7 @@
     catchUpRate: 1.25,
     tickMs: 250,
     maxManualLatencySec: 120,
+    seekableFallbackMaxSec: 60,
     requiredBufferFloorSec: 1.0,
     debug: false,
     debugIntervalMs: 2000,
@@ -167,7 +168,34 @@
     return threshold;
   }
 
-  function getBufferedAheadSec(video) {
+  function getStatsBufferHealthSec(stats) {
+    const bufferRange = stats?.vbu;
+    if (typeof bufferRange !== 'string') {
+      return null;
+    }
+
+    const buffer = bufferRange.split('-');
+    if (buffer.length < 2) {
+      return null;
+    }
+
+    const bufferTime = Number(buffer.at(-1));
+    const currentTime = Number(stats?.vct);
+
+    if (!Number.isFinite(bufferTime) || !Number.isFinite(currentTime)) {
+      return null;
+    }
+
+    return Math.max(0, bufferTime - currentTime);
+  }
+
+  function getBufferedAheadSec(video, stats) {
+    // Prefer YouTube's own buffer range because it matches Stats for nerds more closely.
+    const statsBuffer = getStatsBufferHealthSec(stats);
+    if (Number.isFinite(statsBuffer)) {
+      return statsBuffer;
+    }
+
     if (!video?.buffered?.length) {
       return 0;
     }
@@ -204,38 +232,67 @@
     }
   }
 
-  function getLiveEdgeSec(player, video) {
-    // HTMLMediaElement.seekable.end() is usually the most reliable live edge value.
-    const seekableEdge = getSeekableEdgeSec(video);
-    if (Number.isFinite(seekableEdge) && seekableEdge > 0) {
-      return seekableEdge;
-    }
-
+  function getMediaReferenceLatencySec(player) {
     const mediaReferenceTime = Number(callPlayer(player, 'getMediaReferenceTime'));
-    if (Number.isFinite(mediaReferenceTime) && mediaReferenceTime > 0) {
-      return mediaReferenceTime;
+    const currentWallClockSec = Date.now() / 1000;
+
+    if (!Number.isFinite(mediaReferenceTime) || mediaReferenceTime <= 0) {
+      return null;
     }
 
-    return null;
+    const latencySec = currentWallClockSec - mediaReferenceTime;
+
+    if (!Number.isFinite(latencySec) || latencySec < 0) {
+      return null;
+    }
+
+    return latencySec;
   }
 
-  function getLiveLatencySec(player, video, stats) {
-    const liveEdge = getLiveEdgeSec(player, video);
+  function getSeekableLatencyFallbackSec(video, stats) {
+    const seekableEdge = getSeekableEdgeSec(video);
     const currentTimeFromStats = Number(stats?.vct);
     const currentTime = Number.isFinite(currentTimeFromStats)
       ? currentTimeFromStats
       : Number(video?.currentTime);
 
-    if (!Number.isFinite(liveEdge) || !Number.isFinite(currentTime)) {
+    if (!Number.isFinite(seekableEdge) || !Number.isFinite(currentTime)) {
       return null;
     }
 
-    return Math.max(0, liveEdge - currentTime);
+    const latencySec = Math.max(0, seekableEdge - currentTime);
+
+    // On long DVR/live streams this value can represent timeline distance rather than actual live latency.
+    // Ignore very large fallback values so they do not trigger the manual-latency safety guard incorrectly.
+    if (latencySec > CONFIG.seekableFallbackMaxSec) {
+      return null;
+    }
+
+    return latencySec;
+  }
+
+  function getLiveLatencySec(player, video, stats) {
+    // Original-like calculation: this matches YouTube's displayed Live Latency more reliably.
+    const mediaReferenceLatency = getMediaReferenceLatencySec(player);
+    if (Number.isFinite(mediaReferenceLatency)) {
+      return mediaReferenceLatency;
+    }
+
+    return getSeekableLatencyFallbackSec(video, stats);
   }
 
   function getAvailablePlaybackRates(player) {
     const rates = callPlayer(player, 'getAvailablePlaybackRates');
     return Array.isArray(rates) ? rates : [];
+  }
+
+  function getPlaybackRate(player, video) {
+    const playerRate = Number(callPlayer(player, 'getPlaybackRate'));
+    if (Number.isFinite(playerRate) && playerRate > 0) {
+      return playerRate;
+    }
+
+    return Number(video?.playbackRate) || CONFIG.normalRate;
   }
 
   function setPlaybackRate(player, video, rate) {
@@ -315,21 +372,26 @@
     }
 
     const latencySec = getLiveLatencySec(player, video, stats);
-    const bufferSec = getBufferedAheadSec(video);
+    const bufferSec = getBufferedAheadSec(video, stats);
     const threshold = getThreshold(stats);
     const availableRates = getAvailablePlaybackRates(player);
+    const playbackRate = getPlaybackRate(player, video);
     const status = {
       reason: 'checking',
       accelerating: state.accelerating,
       latencySec,
       bufferSec,
       threshold,
-      playbackRate: video.playbackRate,
+      playbackRate,
+      videoPlaybackRate: video.playbackRate,
       availableRates,
       statsLive: stats?.live,
       latencyClass: stats?.latency_class,
       currentTime: video.currentTime,
+      statsCurrentTime: stats?.vct,
+      mediaReferenceLatency: getMediaReferenceLatencySec(player),
       seekableEdge: getSeekableEdgeSec(video),
+      seekableLatencyFallback: getSeekableLatencyFallbackSec(video, stats),
     };
 
     if (latencySec == null) {
@@ -338,14 +400,15 @@
     }
 
     // If the viewer is intentionally far behind the live edge, avoid fighting them.
-    if (latencySec >= CONFIG.maxManualLatencySec) {
+    // Same idea as the original: apply this safety guard mainly to DVR/premiere-like playback.
+    if (stats?.live !== 'live' && latencySec >= CONFIG.maxManualLatencySec) {
       stopAcceleration(player, video, 'manual latency assumed');
       publishStatus({ ...status, reason: 'manual-latency-assumed' });
       return;
     }
 
     // Avoid overriding a custom speed chosen by the viewer.
-    if (!state.accelerating && Math.abs(Number(video.playbackRate) - CONFIG.normalRate) > 0.01) {
+    if (!state.accelerating && Math.abs(playbackRate - CONFIG.normalRate) > 0.01) {
       publishStatus({ ...status, reason: 'manual-playback-rate-detected' });
       return;
     }
