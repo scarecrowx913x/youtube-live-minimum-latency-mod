@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.1
+// @version      0.1.0-mod.2
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -29,6 +29,8 @@
 (() => {
   'use strict';
 
+  const DEBUG_STORAGE_KEY = 'yt_lml_debug';
+
   const CONFIG = Object.freeze({
     normalRate: 1.0,
     catchUpRate: 1.25,
@@ -36,6 +38,7 @@
     maxManualLatencySec: 120,
     requiredBufferFloorSec: 1.0,
     debug: false,
+    debugIntervalMs: 2000,
 
     thresholds: Object.freeze({
       ultraLow: Object.freeze({ latencySec: 2.5, bufferSec: 1.5 }),
@@ -50,12 +53,34 @@
     timerId: null,
     lastUrl: location.href,
     accelerating: false,
+    lastDebugAt: 0,
+    lastStatus: null,
   };
 
+  function isDebugEnabled() {
+    return CONFIG.debug || window.localStorage?.getItem(DEBUG_STORAGE_KEY) === '1';
+  }
+
   function log(...args) {
-    if (CONFIG.debug) {
+    if (isDebugEnabled()) {
       console.debug('[YT Live Minimum Latency]', ...args);
     }
+  }
+
+  function publishStatus(status) {
+    state.lastStatus = status;
+
+    if (!isDebugEnabled()) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - state.lastDebugAt < CONFIG.debugIntervalMs) {
+      return;
+    }
+
+    state.lastDebugAt = now;
+    console.debug('[YT Live Minimum Latency] status', status);
   }
 
   function getPlayer() {
@@ -100,7 +125,8 @@
       videoData?.isLive ||
       videoData?.isLiveContent ||
       stats?.live ||
-      video?.duration === Infinity
+      video?.duration === Infinity ||
+      video?.seekable?.length
     );
   }
 
@@ -162,19 +188,29 @@
     return Math.max(0, bestEnd - currentTime);
   }
 
-  function getLiveEdgeSec(player, video) {
-    const mediaReferenceTime = Number(callPlayer(player, 'getMediaReferenceTime'));
-
-    if (Number.isFinite(mediaReferenceTime) && mediaReferenceTime > 0) {
-      return mediaReferenceTime;
+  function getSeekableEdgeSec(video) {
+    if (!video?.seekable?.length) {
+      return null;
     }
 
-    if (video?.seekable?.length) {
-      try {
-        return video.seekable.end(video.seekable.length - 1);
-      } catch (error) {
-        log('seekable.end failed', error);
-      }
+    try {
+      return video.seekable.end(video.seekable.length - 1);
+    } catch (error) {
+      log('seekable.end failed', error);
+      return null;
+    }
+  }
+
+  function getLiveEdgeSec(player, video) {
+    // HTMLMediaElement.seekable.end() is usually the most reliable live edge value.
+    const seekableEdge = getSeekableEdgeSec(video);
+    if (Number.isFinite(seekableEdge) && seekableEdge > 0) {
+      return seekableEdge;
+    }
+
+    const mediaReferenceTime = Number(callPlayer(player, 'getMediaReferenceTime'));
+    if (Number.isFinite(mediaReferenceTime) && mediaReferenceTime > 0) {
+      return mediaReferenceTime;
     }
 
     return null;
@@ -194,31 +230,28 @@
     return Math.max(0, liveEdge - currentTime);
   }
 
-  function supportsPlaybackRate(player, rate) {
+  function getAvailablePlaybackRates(player) {
     const rates = callPlayer(player, 'getAvailablePlaybackRates');
-
-    if (Array.isArray(rates) && rates.length > 0) {
-      return rates.includes(rate);
-    }
-
-    return true;
+    return Array.isArray(rates) ? rates : [];
   }
 
   function setPlaybackRate(player, video, rate) {
-    if (!supportsPlaybackRate(player, rate)) {
-      return false;
-    }
+    const availableRates = getAvailablePlaybackRates(player);
 
-    const result = callPlayer(player, 'setPlaybackRate', rate);
+    // YouTube may not list 1.25x for some live streams even when the video element accepts it.
+    // Try the player API first only when it explicitly supports the target rate.
+    if (availableRates.length === 0 || availableRates.includes(rate)) {
+      const result = callPlayer(player, 'setPlaybackRate', rate);
 
-    if (result !== undefined) {
-      return true;
+      if (result !== undefined) {
+        return true;
+      }
     }
 
     if (video) {
       try {
         video.playbackRate = rate;
-        return true;
+        return Math.abs(Number(video.playbackRate) - rate) <= 0.01;
       } catch (error) {
         log('video.playbackRate failed', error);
       }
@@ -235,6 +268,8 @@
     if (setPlaybackRate(player, video, CONFIG.catchUpRate)) {
       state.accelerating = true;
       log('accelerating', reason);
+    } else {
+      log('failed to accelerate', reason);
     }
   }
 
@@ -246,6 +281,8 @@
     if (setPlaybackRate(player, video, CONFIG.normalRate)) {
       state.accelerating = false;
       log('normal speed', reason);
+    } else {
+      log('failed to return normal speed', reason);
     }
   }
 
@@ -254,44 +291,70 @@
     const video = getVideo(player);
 
     if (!player || !video) {
+      publishStatus({ reason: 'waiting-player-or-video', hasPlayer: Boolean(player), hasVideo: Boolean(video) });
       return;
     }
 
     const stats = getVideoStats(player);
+    const videoData = getVideoData(player);
+    const isLive = isLivePlayback(player, video, stats);
 
-    if (!isLivePlayback(player, video, stats)) {
+    if (!isLive) {
       stopAcceleration(player, video, 'not live');
+      publishStatus({ reason: 'not-live', statsLive: stats?.live, videoDuration: video.duration, videoData });
       return;
     }
 
     if (video.paused || video.ended) {
       stopAcceleration(player, video, 'paused or ended');
+      publishStatus({ reason: 'paused-or-ended', paused: video.paused, ended: video.ended });
       return;
     }
 
     const latencySec = getLiveLatencySec(player, video, stats);
     const bufferSec = getBufferedAheadSec(video);
     const threshold = getThreshold(stats);
+    const availableRates = getAvailablePlaybackRates(player);
+    const status = {
+      reason: 'checking',
+      accelerating: state.accelerating,
+      latencySec,
+      bufferSec,
+      threshold,
+      playbackRate: video.playbackRate,
+      availableRates,
+      statsLive: stats?.live,
+      latencyClass: stats?.latency_class,
+      currentTime: video.currentTime,
+      seekableEdge: getSeekableEdgeSec(video),
+    };
 
     if (latencySec == null) {
+      publishStatus({ ...status, reason: 'latency-unavailable' });
       return;
     }
 
     // If the viewer is intentionally far behind the live edge, avoid fighting them.
     if (latencySec >= CONFIG.maxManualLatencySec) {
       stopAcceleration(player, video, 'manual latency assumed');
+      publishStatus({ ...status, reason: 'manual-latency-assumed' });
       return;
     }
 
     // Avoid overriding a custom speed chosen by the viewer.
     if (!state.accelerating && Math.abs(Number(video.playbackRate) - CONFIG.normalRate) > 0.01) {
+      publishStatus({ ...status, reason: 'manual-playback-rate-detected' });
       return;
     }
 
     if (!state.accelerating) {
       if (latencySec > threshold.latencySec && bufferSec >= threshold.bufferSec) {
         startAcceleration(player, video, { latencySec, bufferSec, threshold });
+        publishStatus({ ...status, reason: 'accelerating-started' });
+        return;
       }
+
+      publishStatus({ ...status, reason: 'below-threshold' });
       return;
     }
 
@@ -300,7 +363,11 @@
       bufferSec <= Math.max(CONFIG.requiredBufferFloorSec, threshold.bufferSec / 2)
     ) {
       stopAcceleration(player, video, { latencySec, bufferSec, threshold });
+      publishStatus({ ...status, reason: 'acceleration-stopped' });
+      return;
     }
+
+    publishStatus({ ...status, reason: 'accelerating-continued' });
   }
 
   function startLoop() {
@@ -331,6 +398,20 @@
       }
     }, 1000);
   }
+
+  window.YTLiveMinimumLatency = Object.freeze({
+    enableDebug() {
+      window.localStorage?.setItem(DEBUG_STORAGE_KEY, '1');
+      console.info('[YT Live Minimum Latency] Debug enabled. Reload the page if logs do not appear.');
+    },
+    disableDebug() {
+      window.localStorage?.removeItem(DEBUG_STORAGE_KEY);
+      console.info('[YT Live Minimum Latency] Debug disabled.');
+    },
+    getStatus() {
+      return state.lastStatus;
+    },
+  });
 
   watchUrlChanges();
   startLoop();
