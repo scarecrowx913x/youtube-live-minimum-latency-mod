@@ -33,22 +33,16 @@ LICENSE
 
 ### 🚀 ワンクリック（推奨）
 
-- 👉 **[インストール（Raw .user.js）](./youtube-live-minimum-latency.user.js?raw=1)**
+- 👉 **[インストールを開始（script ファイルを開く）](./youtube-live-minimum-latency.user.js)**
 
-このリンクは相対パスなので、GitHub 上でこの README を開いていればそのまま使えます。
+> Violentmonkey では、次の「Raw」ボタン経由が確実です（下の手順）。
 
 ### Userscript マネージャが未導入の方
 
 1. ブラウザに Tampermonkey / Violentmonkey をインストール
-2. 上の「インストール（Raw .user.js）」リンクを開いて **Install** を押す
-
-### コピペ用 URL
-
-上の「インストール（Raw .user.js）」リンクを右クリックしてリンク先 URL をコピーしてください。
-
-### リポジトリ URL
-
-この README を開いているページの URL がそのままリポジトリ URL です。
+2. 上の「インストールを開始」リンクを開く
+3. GitHub のファイル表示ページ右上にある **Raw** を押す
+4. Violentmonkey / Tampermonkey のインストール画面で **Install** を押す
 
 ## Notes
 
