@@ -29,20 +29,18 @@ README.md
 LICENSE
 ```
 
-## Install
+## インストール
 
-### 🚀 ワンクリック（推奨）
+1. ブラウザに Userscript マネージャ（Tampermonkey / Violentmonkey など）をインストールする
 
-- 👉 **[インストールを開始（script ファイルを開く）](./youtube-live-minimum-latency.user.js)**
+2. 以下のリンクをクリック
 
-> Violentmonkey では、次の「Raw」ボタン経由が確実です（下の手順）。
+   👉 [インストールはこちら](https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod/raw/main/youtube-live-minimum-latency.user.js)
 
-### Userscript マネージャが未導入の方
+**コピペ用URL**  
+https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js
 
-1. ブラウザに Tampermonkey / Violentmonkey をインストール
-2. 上の「インストールを開始」リンクを開く
-3. GitHub のファイル表示ページ右上にある **Raw** を押す
-4. Violentmonkey / Tampermonkey のインストール画面で **Install** を押す
+3. Userscript マネージャのインストール画面が出るので、「インストール」を選ぶ
 
 ## Notes
 
