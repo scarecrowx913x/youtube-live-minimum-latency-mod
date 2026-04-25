@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.3
+// @version      0.1.0-mod.4
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -41,13 +41,14 @@
     debugIntervalMs: 2000,
 
     thresholds: Object.freeze({
-      ultraLow: Object.freeze({ latencySec: 2.5, bufferSec: 1.5 }),
-      low: Object.freeze({ latencySec: 6.0, bufferSec: 2.0 }),
-      normal: Object.freeze({ latencySec: 12.0, bufferSec: 3.0 }),
-      premiere: Object.freeze({ latencySec: 15.0, bufferSec: 3.0 }),
+      // Original-like thresholds: react quickly to small live latency drift.
+      ultraLow: Object.freeze({ latencySec: 2.0, bufferSec: 1.0 }),
+      low: Object.freeze({ latencySec: 3.0, bufferSec: 2.0 }),
+      normal: Object.freeze({ latencySec: 10.0, bufferSec: 2.0 }),
+      premiere: Object.freeze({ latencySec: 10.0, bufferSec: 2.0 }),
       // YouTube may not expose latency_class through getVideoStats().
-      // For this script's purpose, unknown should behave closer to low latency than normal latency.
-      unknown: Object.freeze({ latencySec: 6.0, bufferSec: 2.0 }),
+      // If unknown, use the low-latency profile so optimized live streams still react quickly.
+      unknown: Object.freeze({ latencySec: 3.0, bufferSec: 2.0 }),
     }),
   });
 
