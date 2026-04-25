@@ -31,7 +31,24 @@ LICENSE
 
 ## Install
 
-Tampermonkey / Violentmonkey で `youtube-live-minimum-latency.user.js` の Raw URL を開くとインストールできます。
+### 🚀 ワンクリック（推奨）
+
+- 👉 **[インストール（Raw .user.js）](https://raw.githubusercontent.com/<YOUR_GITHUB_USER>/<YOUR_REPO>/main/youtube-live-minimum-latency.user.js)**
+
+> `\<YOUR_GITHUB_USER>` と `\<YOUR_REPO>` を実際の GitHub の値に置き換えてください。
+
+### Userscript マネージャが未導入の方
+
+1. ブラウザに Tampermonkey / Violentmonkey をインストール
+2. 上の「インストール（Raw .user.js）」リンクを開いて **Install** を押す
+
+### コピペ用 URL
+
+`https://raw.githubusercontent.com/<YOUR_GITHUB_USER>/<YOUR_REPO>/main/youtube-live-minimum-latency.user.js`
+
+### リポジトリ URL
+
+`https://github.com/<YOUR_GITHUB_USER>/<YOUR_REPO>`
 
 ## Notes
 
