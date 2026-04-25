@@ -33,9 +33,9 @@ LICENSE
 
 ### 🚀 ワンクリック（推奨）
 
-- 👉 **[インストール（Raw .user.js）](https://raw.githubusercontent.com/<YOUR_GITHUB_USER>/<YOUR_REPO>/main/youtube-live-minimum-latency.user.js)**
+- 👉 **[インストール（Raw .user.js）](./youtube-live-minimum-latency.user.js?raw=1)**
 
-> `\<YOUR_GITHUB_USER>` と `\<YOUR_REPO>` を実際の GitHub の値に置き換えてください。
+このリンクは相対パスなので、GitHub 上でこの README を開いていればそのまま使えます。
 
 ### Userscript マネージャが未導入の方
 
@@ -44,11 +44,11 @@ LICENSE
 
 ### コピペ用 URL
 
-`https://raw.githubusercontent.com/<YOUR_GITHUB_USER>/<YOUR_REPO>/main/youtube-live-minimum-latency.user.js`
+上の「インストール（Raw .user.js）」リンクを右クリックしてリンク先 URL をコピーしてください。
 
 ### リポジトリ URL
 
-`https://github.com/<YOUR_GITHUB_USER>/<YOUR_REPO>`
+この README を開いているページの URL がそのままリポジトリ URL です。
 
 ## Notes
 
