@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.10
+// @version      0.1.0-mod.11
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -30,11 +30,13 @@
   'use strict';
 
   const DEBUG_STORAGE_KEY = 'yt_lml_debug';
+  const VIDEO_LISTENER_KEY = '__ytLmlVideoListenersAttached';
 
   const CONFIG = Object.freeze({
     normalRate: 1.0,
     catchUpRate: 1.25,
-    tickMs: 500,
+    idleTickMs: 60 * 1000,
+    activeTickMs: 500,
     maxManualLatencySec: 120,
     seekableFallbackMaxSec: 60,
     requiredBufferFloorSec: 1.0,
@@ -55,6 +57,7 @@
 
   const state = {
     timerId: null,
+    currentTickMs: null,
     lastUrl: location.href,
     accelerating: false,
     lastDebugAt: 0,
@@ -362,6 +365,23 @@
     return setPlaybackRate(player, video, rate);
   }
 
+  function restartTimer(delayMs) {
+    if (state.timerId) {
+      clearInterval(state.timerId);
+    }
+
+    state.currentTickMs = delayMs;
+    state.timerId = window.setInterval(tick, delayMs);
+  }
+
+  function updateTickInterval() {
+    const nextTickMs = state.accelerating ? CONFIG.activeTickMs : CONFIG.idleTickMs;
+
+    if (state.currentTickMs !== nextTickMs) {
+      restartTimer(nextTickMs);
+    }
+  }
+
   function startAcceleration(player, video, reason) {
     if (state.accelerating) {
       return enforcePlaybackRate(player, video, CONFIG.catchUpRate);
@@ -369,6 +389,7 @@
 
     if (setPlaybackRate(player, video, CONFIG.catchUpRate)) {
       state.accelerating = true;
+      updateTickInterval();
       log('accelerating', reason);
       return true;
     }
@@ -384,6 +405,7 @@
 
     if (setPlaybackRate(player, video, CONFIG.normalRate)) {
       state.accelerating = false;
+      updateTickInterval();
       log('normal speed', reason);
     } else {
       log('failed to return normal speed', reason);
@@ -444,6 +466,16 @@
     });
   }
 
+  function ensureVideoListeners(video) {
+    if (!video || video[VIDEO_LISTENER_KEY]) {
+      return;
+    }
+
+    video[VIDEO_LISTENER_KEY] = true;
+    video.addEventListener('playing', tick, false);
+    video.addEventListener('play', tick, false);
+  }
+
   function tick() {
     const player = getPlayer();
     const video = getVideo(player);
@@ -452,6 +484,8 @@
       publishStatus({ reason: 'waiting-player-or-video', hasPlayer: Boolean(player), hasVideo: Boolean(video) });
       return;
     }
+
+    ensureVideoListeners(video);
 
     const stats = getVideoStats(player);
     const videoData = getVideoData(player);
@@ -494,6 +528,8 @@
       mediaReferenceLatency: getMediaReferenceLatencySec(player),
       seekableEdge: getSeekableEdgeSec(video),
       seekableLatencyFallback: getSeekableLatencyFallbackSec(video, stats),
+      pollingMs: state.currentTickMs,
+      pollingMode: state.accelerating ? 'active' : 'idle',
     };
 
     // If live latency cannot be obtained, use Buffer Health as a practical fallback.
@@ -567,11 +603,7 @@
   }
 
   function startLoop() {
-    if (state.timerId) {
-      clearInterval(state.timerId);
-    }
-
-    state.timerId = window.setInterval(tick, CONFIG.tickMs);
+    restartTimer(state.accelerating ? CONFIG.activeTickMs : CONFIG.idleTickMs);
     tick();
   }
 
