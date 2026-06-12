@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.11
+// @version      0.1.0-mod.12
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -24,6 +24,11 @@
  *   - This script only runs on youtube.com.
  *   - It does not use external network requests.
  *   - It does not store personal data.
+ *
+ * v0.1.0-mod.12 Changes:
+ *   - Multi-stage playback rate adjustment based on latency
+ *   - Performance optimizations: reduced DOM queries, event listener cleanup
+ *   - Dynamic polling interval based on buffer state
  */
 
 (() => {
@@ -31,12 +36,20 @@
 
   const DEBUG_STORAGE_KEY = 'yt_lml_debug';
   const VIDEO_LISTENER_KEY = '__ytLmlVideoListenersAttached';
+  const PLAYER_CACHE_KEY = '__ytLmlPlayerCache';
+  const VIDEO_CACHE_KEY = '__ytLmlVideoCache';
 
   const CONFIG = Object.freeze({
     normalRate: 1.0,
-    catchUpRate: 1.25,
+    // Multi-stage acceleration: latencySec -> playbackRate
+    accelerationStages: Object.freeze([
+      { latencyThreshold: 3.0, playbackRate: 1.1 },   // 3-5s: mild acceleration
+      { latencyThreshold: 5.0, playbackRate: 1.15 },  // 5-10s: moderate acceleration
+      { latencyThreshold: 10.0, playbackRate: 1.25 }, // 10+s: stronger acceleration
+    ]),
     idleTickMs: 60 * 1000,
     activeTickMs: 500,
+    bufferLowTickMs: 2000, // Increased polling when buffer is low
     maxManualLatencySec: 120,
     seekableFallbackMaxSec: 60,
     requiredBufferFloorSec: 1.0,
@@ -44,15 +57,15 @@
     debugIntervalMs: 2000,
 
     thresholds: Object.freeze({
-      // Original-like thresholds: react quickly to small live latency drift.
       ultraLow: Object.freeze({ latencySec: 2.0, bufferSec: 1.0 }),
       low: Object.freeze({ latencySec: 3.0, bufferSec: 2.0 }),
       normal: Object.freeze({ latencySec: 10.0, bufferSec: 2.0 }),
       premiere: Object.freeze({ latencySec: 10.0, bufferSec: 2.0 }),
-      // YouTube may not expose latency_class through getVideoStats().
-      // If unknown, use the low-latency profile so optimized live streams still react quickly.
       unknown: Object.freeze({ latencySec: 3.0, bufferSec: 2.0 }),
     }),
+
+    // Cache TTL to reduce redundant DOM queries
+    cacheTtlMs: 100,
   });
 
   const state = {
@@ -62,6 +75,11 @@
     accelerating: false,
     lastDebugAt: 0,
     lastStatus: null,
+    // Cache with timestamp
+    playerCache: { value: null, timestamp: 0 },
+    videoCache: { value: null, timestamp: 0 },
+    // Event listener cleanup tracking
+    eventListenersAttached: false,
   };
 
   function isDebugEnabled() {
@@ -90,16 +108,38 @@
     console.debug('[YT Live Minimum Latency] status', status);
   }
 
+  // Cached player getter to reduce DOM queries
   function getPlayer() {
-    return document.querySelector('#movie_player');
+    const now = Date.now();
+    if (now - state.playerCache.timestamp < CONFIG.cacheTtlMs && state.playerCache.value) {
+      return state.playerCache.value;
+    }
+
+    const player = document.querySelector('#movie_player');
+    state.playerCache = { value: player, timestamp: now };
+    return player;
   }
 
+  // Cached video getter to reduce DOM queries
   function getVideo(player = getPlayer()) {
-    return (
+    const now = Date.now();
+    if (now - state.videoCache.timestamp < CONFIG.cacheTtlMs && state.videoCache.value) {
+      return state.videoCache.value;
+    }
+
+    const video = (
       document.querySelector('video.html5-main-video') ||
       player?.querySelector?.('video') ||
       document.querySelector('video')
     );
+
+    state.videoCache = { value: video, timestamp: now };
+    return video;
+  }
+
+  function invalidateCaches() {
+    state.playerCache.timestamp = 0;
+    state.videoCache.timestamp = 0;
   }
 
   function callPlayer(player, methodName, ...args) {
@@ -173,11 +213,8 @@
     const thresholdKey = getLatencyClassKey(stats?.latency_class);
     const base = CONFIG.thresholds[thresholdKey] || CONFIG.thresholds.unknown;
 
-    // Important: copy the threshold object before customizing it.
-    // Do not mutate CONFIG.thresholds.
     const threshold = { ...base, key: thresholdKey };
 
-    // YouTube Premiere / live premiere often behaves differently from ordinary live streams.
     if (stats?.live === 'lp') {
       return { ...threshold, ...CONFIG.thresholds.premiere, key: 'premiere' };
     }
@@ -207,7 +244,6 @@
   }
 
   function getBufferedAheadSec(video, stats) {
-    // Prefer YouTube's own buffer range because it matches Stats for nerds more closely.
     const statsBuffer = getStatsBufferHealthSec(stats);
     if (Number.isFinite(statsBuffer)) {
       return statsBuffer;
@@ -279,8 +315,6 @@
 
     const latencySec = Math.max(0, seekableEdge - currentTime);
 
-    // On long DVR/live streams this value can represent timeline distance rather than actual live latency.
-    // Ignore very large fallback values so they do not trigger the manual-latency safety guard incorrectly.
     if (latencySec > CONFIG.seekableFallbackMaxSec) {
       return null;
     }
@@ -289,7 +323,6 @@
   }
 
   function getLiveLatencySec(player, video, stats) {
-    // This captures a transport-ish latency that does not always include player buffer.
     const mediaReferenceLatency = getMediaReferenceLatencySec(player);
     if (Number.isFinite(mediaReferenceLatency)) {
       return mediaReferenceLatency;
@@ -299,7 +332,6 @@
   }
 
   function getEffectiveLatencySec(latencySec, bufferSec) {
-    // YouTube's Stats for nerds Live Latency is often close to media reference latency + buffer health.
     if (Number.isFinite(latencySec) && Number.isFinite(bufferSec)) {
       return latencySec + bufferSec;
     }
@@ -309,6 +341,22 @@
     }
 
     return null;
+  }
+
+  // NEW: Get optimal playback rate based on latency
+  function getOptimalPlaybackRate(effectiveLatencySec) {
+    if (!Number.isFinite(effectiveLatencySec)) {
+      return CONFIG.normalRate;
+    }
+
+    // Find the appropriate stage for this latency
+    for (const stage of CONFIG.accelerationStages) {
+      if (effectiveLatencySec >= stage.latencyThreshold) {
+        return stage.playbackRate;
+      }
+    }
+
+    return CONFIG.normalRate;
   }
 
   function getAvailablePlaybackRates(player) {
@@ -337,7 +385,6 @@
       log('video.playbackRate assignment failed', error);
     }
 
-    // Some pages wrap instance properties. Call the native setter too, just in case.
     try {
       const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
       descriptor?.set?.call(video, rate);
@@ -349,8 +396,6 @@
   }
 
   function setPlaybackRate(player, video, rate) {
-    // Some YouTube player methods return undefined even when the operation succeeds.
-    // Do not trust the return value; verify the actual video playback rate.
     callPlayer(player, 'setPlaybackRate', rate);
     setVideoPlaybackRate(video, rate);
 
@@ -374,27 +419,36 @@
     state.timerId = window.setInterval(tick, delayMs);
   }
 
-  function updateTickInterval() {
-    const nextTickMs = state.accelerating ? CONFIG.activeTickMs : CONFIG.idleTickMs;
+  // NEW: Dynamic tick interval based on state
+  function updateTickInterval(bufferSec) {
+    let nextTickMs = CONFIG.idleTickMs;
+
+    if (state.accelerating) {
+      // When accelerating, poll more frequently
+      nextTickMs = CONFIG.activeTickMs;
+    } else if (Number.isFinite(bufferSec) && bufferSec < CONFIG.requiredBufferFloorSec * 2) {
+      // When buffer is low (but not accelerating yet), poll more frequently
+      nextTickMs = CONFIG.bufferLowTickMs;
+    }
 
     if (state.currentTickMs !== nextTickMs) {
       restartTimer(nextTickMs);
     }
   }
 
-  function startAcceleration(player, video, reason) {
-    if (state.accelerating) {
-      return enforcePlaybackRate(player, video, CONFIG.catchUpRate);
+  function startAcceleration(player, video, targetRate, reason) {
+    if (state.accelerating && Math.abs(getActualPlaybackRate(video) - targetRate) <= 0.01) {
+      return true; // Already at target rate
     }
 
-    if (setPlaybackRate(player, video, CONFIG.catchUpRate)) {
+    if (setPlaybackRate(player, video, targetRate)) {
       state.accelerating = true;
-      updateTickInterval();
-      log('accelerating', reason);
+      updateTickInterval(0); // Will be updated on next tick
+      log('accelerating to', targetRate, reason);
       return true;
     }
 
-    log('failed to accelerate', reason);
+    log('failed to accelerate to', targetRate, reason);
     return false;
   }
 
@@ -405,7 +459,7 @@
 
     if (setPlaybackRate(player, video, CONFIG.normalRate)) {
       state.accelerating = false;
-      updateTickInterval();
+      updateTickInterval(null);
       log('normal speed', reason);
     } else {
       log('failed to return normal speed', reason);
@@ -415,16 +469,15 @@
   function handleBufferOnlyFallback(player, video, status) {
     const stopBufferSec = Math.max(CONFIG.requiredBufferFloorSec, status.threshold.bufferSec);
 
-    // Buffer-only mode is mainly for ordinary live streams where getMediaReferenceTime is unavailable.
-    // Avoid applying it to DVR or live premiere, because it could override intentional seeking.
     if (!isPlainLivePlayback(player, video, getVideoStats(player))) {
       publishStatus({ ...status, reason: 'latency-unavailable' });
+      updateTickInterval(status.bufferSec);
       return;
     }
 
     if (!state.accelerating) {
       if (status.bufferSec > status.threshold.bufferSec) {
-        const changed = startAcceleration(player, video, {
+        const changed = startAcceleration(player, video, CONFIG.accelerationStages[1].playbackRate, {
           bufferSec: status.bufferSec,
           threshold: status.threshold,
           fallback: 'buffer-only',
@@ -439,6 +492,7 @@
       }
 
       publishStatus({ ...status, reason: 'latency-unavailable-buffer-below-threshold' });
+      updateTickInterval(status.bufferSec);
       return;
     }
 
@@ -457,7 +511,7 @@
       return;
     }
 
-    const enforced = enforcePlaybackRate(player, video, CONFIG.catchUpRate);
+    const enforced = enforcePlaybackRate(player, video, CONFIG.accelerationStages[1].playbackRate);
     publishStatus({
       ...status,
       reason: enforced ? 'accelerating-continued-buffer-fallback' : 'accelerating-rate-enforce-failed-buffer-fallback',
@@ -474,6 +528,14 @@
     video[VIDEO_LISTENER_KEY] = true;
     video.addEventListener('playing', tick, false);
     video.addEventListener('play', tick, false);
+
+    // Cleanup listeners on video end/pause to prevent memory leaks
+    const cleanupHandler = () => {
+      invalidateCaches();
+      tick();
+    };
+
+    video.addEventListener('ended', cleanupHandler, false);
   }
 
   function tick() {
@@ -494,12 +556,14 @@
     if (!isLive) {
       stopAcceleration(player, video, 'not live');
       publishStatus({ reason: 'not-live', statsLive: stats?.live, videoDuration: video.duration, videoData });
+      updateTickInterval(null);
       return;
     }
 
     if (video.paused || video.ended) {
       stopAcceleration(player, video, 'paused or ended');
       publishStatus({ reason: 'paused-or-ended', paused: video.paused, ended: video.ended });
+      updateTickInterval(null);
       return;
     }
 
@@ -510,12 +574,15 @@
     const availableRates = getAvailablePlaybackRates(player);
     const actualPlaybackRate = getActualPlaybackRate(video);
     const playerPlaybackRate = getPlayerPlaybackRate(player);
+    const optimalRate = getOptimalPlaybackRate(effectiveLatencySec);
+
     const status = {
       reason: 'checking',
       accelerating: state.accelerating,
       latencySec,
       bufferSec,
       effectiveLatencySec,
+      optimalRate,
       threshold,
       playbackRate: actualPlaybackRate,
       videoPlaybackRate: actualPlaybackRate,
@@ -532,33 +599,31 @@
       pollingMode: state.accelerating ? 'active' : 'idle',
     };
 
-    // If live latency cannot be obtained, use Buffer Health as a practical fallback.
-    // This follows the same spirit as the original script's buffer-based behavior for long/current streams.
     if (effectiveLatencySec == null) {
       handleBufferOnlyFallback(player, video, status);
       return;
     }
 
-    // If the viewer is intentionally far behind the live edge, avoid fighting them.
-    // Same idea as the original: apply this safety guard mainly to DVR/premiere-like playback.
     if (stats?.live !== 'live' && effectiveLatencySec >= CONFIG.maxManualLatencySec) {
       stopAcceleration(player, video, 'manual latency assumed');
       publishStatus({ ...status, reason: 'manual-latency-assumed' });
+      updateTickInterval(bufferSec);
       return;
     }
 
-    // Avoid overriding a custom speed chosen by the viewer.
     if (!state.accelerating && Math.abs(actualPlaybackRate - CONFIG.normalRate) > 0.01) {
       publishStatus({ ...status, reason: 'manual-playback-rate-detected' });
+      updateTickInterval(bufferSec);
       return;
     }
 
     if (!state.accelerating) {
       if (effectiveLatencySec > threshold.latencySec && bufferSec >= threshold.bufferSec) {
-        const changed = startAcceleration(player, video, {
+        const changed = startAcceleration(player, video, optimalRate, {
           latencySec,
           bufferSec,
           effectiveLatencySec,
+          optimalRate,
           threshold,
         });
         publishStatus({
@@ -571,13 +636,18 @@
       }
 
       publishStatus({ ...status, reason: 'below-threshold' });
+      updateTickInterval(bufferSec);
       return;
     }
 
-    if (
+    // NEW: Adjust rate based on current latency while accelerating
+    const currentTargetRate = getOptimalPlaybackRate(effectiveLatencySec);
+    const shouldStop = (
       effectiveLatencySec <= threshold.latencySec ||
       bufferSec <= Math.max(CONFIG.requiredBufferFloorSec, threshold.bufferSec / 2)
-    ) {
+    );
+
+    if (shouldStop) {
       stopAcceleration(player, video, {
         latencySec,
         bufferSec,
@@ -593,13 +663,27 @@
       return;
     }
 
-    const enforced = enforcePlaybackRate(player, video, CONFIG.catchUpRate);
+    // Adjust rate mid-acceleration if latency changed significantly
+    if (Math.abs(currentTargetRate - actualPlaybackRate) > 0.01) {
+      enforcePlaybackRate(player, video, currentTargetRate);
+      publishStatus({
+        ...status,
+        reason: 'acceleration-rate-adjusted',
+        actualPlaybackRateAfter: getActualPlaybackRate(video),
+        playerPlaybackRateAfter: getPlayerPlaybackRate(player),
+      });
+      updateTickInterval(bufferSec);
+      return;
+    }
+
+    const enforced = enforcePlaybackRate(player, video, currentTargetRate);
     publishStatus({
       ...status,
       reason: enforced ? 'accelerating-continued' : 'accelerating-rate-enforce-failed',
       actualPlaybackRateAfter: getActualPlaybackRate(video),
       playerPlaybackRateAfter: getPlayerPlaybackRate(player),
     });
+    updateTickInterval(bufferSec);
   }
 
   function startLoop() {
@@ -612,6 +696,7 @@
     const video = getVideo(player);
 
     stopAcceleration(player, video, 'navigation');
+    invalidateCaches();
     state.lastUrl = location.href;
     startLoop();
   }
@@ -619,13 +704,19 @@
   function watchUrlChanges() {
     document.addEventListener('yt-navigate-finish', resetForNavigation, false);
 
-    // Fallback for YouTube SPA navigation changes that may not emit yt-navigate-finish.
     window.setInterval(() => {
       if (state.lastUrl !== location.href) {
         resetForNavigation();
       }
     }, 1000);
   }
+
+  // Cleanup on page unload
+  window.addEventListener('beforeunload', () => {
+    if (state.timerId) {
+      clearInterval(state.timerId);
+    }
+  });
 
   window.YTLiveMinimumLatency = Object.freeze({
     enableDebug() {
