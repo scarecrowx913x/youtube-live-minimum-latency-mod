@@ -2,9 +2,11 @@
 
 YouTube Live の遅延を小さくするための Userscript です。
 
-* ライブ位置から遅れているときに、自動で再生速度を `1.25x` に上げる
+* ライブ位置から遅れているときに、自動で再生速度を上げる
+* 遅延の大きさに応じて段階的に加速（1.1x → 1.15x → 1.25x）
 * ライブ位置に近づいたら、自動で `1.0x` に戻す
 * バッファに余裕があるときだけ加速する
+* 低バッファ時により頻繁に状態をチェック（パフォーマンス最適化）
 * YouTube の画面遷移に対応する
 * 外部通信なし、個人情報の保存なし
 
@@ -19,10 +21,10 @@ YouTube Live を見ているときに、気づかないうちにライブ位置�
 
 2. 以下のリンクをクリック
 
-   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.11)
+   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.12)
 
 **コピペ用URL**  
-https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.11
+https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.12
 
 3. Userscript マネージャのインストール画面が出るので、「インストール」を選ぶ
 
@@ -32,7 +34,7 @@ https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mo
 
 1. YouTube Live を普段どおりに開く
 2. ライブ配信を再生する
-3. ライブ位置から遅れていて、バッファに余裕がある場合だけ自動で `1.25x` に加速する
+3. ライブ位置から遅れていて、バッファに余裕がある場合だけ自動で加速する
 4. ライブ位置に近づくか、バッファが少なくなると自動で `1.0x` に戻る
 
 手動操作は基本的に不要です。
@@ -48,15 +50,15 @@ YouTube Live のページで開発者ツールの Console を開き、以下を�
 YTLiveMinimumLatency.getStatus()
 ```
 
-`reason` が `accelerating-started`、`accelerating-continued`、`accelerating-started-buffer-fallback`、`accelerating-continued-buffer-fallback` などになっていれば、加速判定中です。
+`reason` が `accelerating-started`、`accelerating-continued`、`accelerating-rate-adjusted`、`accelerating-started-buffer-fallback`、`accelerating-continued-buffer-fallback` などになっていれば、加速判定中です。
 
-実際の再生速度は以下で確認できます。
+��際の再生速度は以下で確認できます。
 
 ```js
 document.querySelector('video').playbackRate
 ```
 
-`1.25` と表示されれば加速中、`1` と表示されれば通常速度です。
+`1.1`、`1.15`、`1.25` などと表示されれば加速中、`1` と表示されれば通常速度です。
 
 ---
 
@@ -67,12 +69,38 @@ document.querySelector('video').playbackRate
 * ライブ配信かどうかを確認する
 * 現在位置とライブ位置の差を確認する
 * バッファ量を確認する
+* 遅延度に応じて最適な再生速度を決定する
 * 条件を満たした場合だけ再生速度を上げる
 * 条件を外れたら通常速度に戻す
 
+### 段階的な加速レート
+
+遅延が大きくなるほど、より強く加速します：
+
+| 遅延時間 | 再生速度 | 用途 |
+|---------|---------|------|
+| 0-3秒   | 1.0x    | 通常速度 |
+| 3-5秒   | 1.1x    | 軽度の遅れに対応 |
+| 5-10秒  | 1.15x   | 中程度の遅れに対応 |
+| 10秒以上 | 1.25x   | 大きな遅れに対応 |
+
 YouTube の環境によっては Live Latency が直接取得できないため、Buffer Health を使って補助判定します。
-通常時は約60秒ごとに確認し、加速中は約0.5秒ごとに確認します。再生開始時やYouTube内のページ移動時は、待たずにすぐ確認します。
-視聴者が意図的に大きく巻き戻して見ている可能性がある場合は、無理に追いつこうとしないようにしています。
+
+### ポーリング間隔の動的調整
+
+パフォーマンスを最適化するため、状態に応じてポーリング間隔を自動調整します：
+
+* **通常時**: 約60秒ごと（CPU使用率を最小化）
+* **加速中**: 約0.5秒ごと（遅延変化への素早い対応）
+* **バッファ低下時**: 約2秒ごと（バッファ不足に早期に対応）
+
+再生開始時やYouTube内のページ移動時は、待たずにすぐ確認します。視聴者が意図的に大きく巻き戻して見ている可能性がある場合は、無理に追いつこうとしないようにしています。
+
+### パフォーマンス最適化
+
+* **DOM クエリのキャッシング**: 連続したクエリを避け、100ms のキャッシュを使用
+* **メモリリーク防止**: イベントリスナーの適切なクリーンアップ
+* **効率的なキャッシュ無効化**: ページ遷移時のみキャッシュをリセット
 
 ---
 
@@ -99,7 +127,7 @@ LICENSE
 ### インストール画面が出ない場合
 
 * Tampermonkey / Violentmonkey などの Userscript マネージャが入っているか確認してください。
-* 上の「インストールはこちら」ではなく、コピペ用URLを直接ブラウザで開いてください。
+* 上の「インストールはこちら」ではなく、コピペ用URLを直��ブラウザで開いてください。
 * 古いバージョンが表示される場合は、スクリプトを削除してから、上のリンクで入れ直してください。
 
 ### 動作しているか分からない場合
@@ -107,6 +135,7 @@ LICENSE
 * YouTube Live のページでスクリプトが有効になっているか確認してください。
 * 通常動画ではなく、ライブ配信で確認してください。
 * Console で `YTLiveMinimumLatency.getStatus()` を実行して状態を確認してください。
+* `optimalRate` フィールドで、現在の最適加速レートを確認できます。
 * 配信やYouTube側の仕様によって、加速条件を満たさない場合があります。
 
 ### 再生速度が変わらない場合
@@ -114,6 +143,12 @@ LICENSE
 * バッファが少ない場合は、加速しないようにしています。
 * ライブ位置からの遅れが小さい場合は、加速しません。
 * 視聴者が手動で再生速度を変えている場合は、その操作を優先します。
+
+### 加速が停止した場合
+
+* ライブ位置に追いつくと、自動で通常速度に戻ります。
+* バッファが不足すると、再生を優先するため加速を停止します。
+* ライブ配信が終了した場合も加速が停止します。
 
 ---
 
@@ -123,6 +158,19 @@ LICENSE
 YouTube 側の仕様変更により、動作しなくなったり、配信によって挙動が変わったりする場合があります。
 
 また、ライブ配信の種類や遅延設定によって、必ずライブ位置へ追いつけるとは限りません。
+
+---
+
+## v0.1.0-mod.12 の改善点
+
+### 新機能
+* **段階的な加速レート**: 遅延の大きさに応じて 1.1x → 1.15x → 1.25x に自動調整
+* **加速中の動的レート調整**: 遅延が変化した場合、その場で最適なレートに変更
+
+### パフォーマンス改善
+* **DOM クエリキャッシング**: 不要な DOM 操作を削減（キャッシュ有効期限: 100ms）
+* **動的ポーリング間隔**: 通常(60秒) / 加速中(0.5秒) / バッファ低下時(2秒)
+* **メモリリーク防止**: イベントリスナーの適切なクリーンアップ、ページ離脱時のタイマークリア
 
 ---
 
