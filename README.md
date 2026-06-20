@@ -21,10 +21,10 @@ YouTube Live を見ているときに、気づかないうちにライブ位置�
 
 2. 以下のリンクをクリック
 
-   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.12)
+   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.13)
 
 **コピペ用URL**  
-https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.12
+https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.13
 
 3. Userscript マネージャのインストール画面が出るので、「インストール」を選ぶ
 
@@ -52,7 +52,7 @@ YTLiveMinimumLatency.getStatus()
 
 `reason` が `accelerating-started`、`accelerating-continued`、`accelerating-rate-adjusted`、`accelerating-started-buffer-fallback`、`accelerating-continued-buffer-fallback` などになっていれば、加速判定中です。
 
-��際の再生速度は以下で確認できます。
+実際の再生速度は以下で確認できます。
 
 ```js
 document.querySelector('video').playbackRate
@@ -127,7 +127,7 @@ LICENSE
 ### インストール画面が出ない場合
 
 * Tampermonkey / Violentmonkey などの Userscript マネージャが入っているか確認してください。
-* 上の「インストールはこちら」ではなく、コピペ用URLを直��ブラウザで開いてください。
+* 上の「インストールはこちら」ではなく、コピペ用URLを直接ブラウザで開いてください。
 * 古いバージョンが表示される場合は、スクリプトを削除してから、上のリンクで入れ直してください。
 
 ### 動作しているか分からない場合
@@ -161,13 +161,15 @@ YouTube 側の仕様変更により、動作しなくなったり、配信によ
 
 ---
 
-## v0.1.0-mod.12 の改善点
+## v0.1.0-mod.13 の改善点
 
-### 新機能
+### 修正
+* **段階的な加速レート選択を修正**: 遅延が大きい場合に 1.15x / 1.25x へ到達するように変更
+* **加速判定を実遅延基準へ変更**: バッファ量を遅延に加算せず、実際のライブ遅延を主軸に判定
+
+### 継続機能
 * **段階的な加速レート**: 遅延の大きさに応じて 1.1x → 1.15x → 1.25x に自動調整
 * **加速中の動的レート調整**: 遅延が変化した場合、その場で最適なレートに変更
-
-### パフォーマンス改善
 * **DOM クエリキャッシング**: 不要な DOM 操作を削減（キャッシュ有効期限: 100ms）
 * **動的ポーリング間隔**: 通常(60秒) / 加速中(0.5秒) / バッファ低下時(2秒)
 * **メモリリーク防止**: イベントリスナーの適切なクリーンアップ、ページ離脱時のタイマークリア
