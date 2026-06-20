@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.12
+// @version      0.1.0-mod.13
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -24,6 +24,10 @@
  *   - This script only runs on youtube.com.
  *   - It does not use external network requests.
  *   - It does not store personal data.
+ *
+ * v0.1.0-mod.13 Changes:
+ *   - Fix multi-stage playback rate selection order
+ *   - Use actual latency for acceleration decisions instead of latency + buffer
  *
  * v0.1.0-mod.12 Changes:
  *   - Multi-stage playback rate adjustment based on latency
@@ -343,15 +347,13 @@
     return null;
   }
 
-  // NEW: Get optimal playback rate based on latency
-  function getOptimalPlaybackRate(effectiveLatencySec) {
-    if (!Number.isFinite(effectiveLatencySec)) {
+  function getOptimalPlaybackRate(latencySec) {
+    if (!Number.isFinite(latencySec)) {
       return CONFIG.normalRate;
     }
 
-    // Find the appropriate stage for this latency
-    for (const stage of CONFIG.accelerationStages) {
-      if (effectiveLatencySec >= stage.latencyThreshold) {
+    for (const stage of CONFIG.accelerationStages.slice().reverse()) {
+      if (latencySec >= stage.latencyThreshold) {
         return stage.playbackRate;
       }
     }
@@ -574,7 +576,7 @@
     const availableRates = getAvailablePlaybackRates(player);
     const actualPlaybackRate = getActualPlaybackRate(video);
     const playerPlaybackRate = getPlayerPlaybackRate(player);
-    const optimalRate = getOptimalPlaybackRate(effectiveLatencySec);
+    const optimalRate = getOptimalPlaybackRate(latencySec);
 
     const status = {
       reason: 'checking',
@@ -599,12 +601,12 @@
       pollingMode: state.accelerating ? 'active' : 'idle',
     };
 
-    if (effectiveLatencySec == null) {
+    if (latencySec == null) {
       handleBufferOnlyFallback(player, video, status);
       return;
     }
 
-    if (stats?.live !== 'live' && effectiveLatencySec >= CONFIG.maxManualLatencySec) {
+    if (stats?.live !== 'live' && latencySec >= CONFIG.maxManualLatencySec) {
       stopAcceleration(player, video, 'manual latency assumed');
       publishStatus({ ...status, reason: 'manual-latency-assumed' });
       updateTickInterval(bufferSec);
@@ -618,7 +620,7 @@
     }
 
     if (!state.accelerating) {
-      if (effectiveLatencySec > threshold.latencySec && bufferSec >= threshold.bufferSec) {
+      if (latencySec > threshold.latencySec && bufferSec >= threshold.bufferSec) {
         const changed = startAcceleration(player, video, optimalRate, {
           latencySec,
           bufferSec,
@@ -640,10 +642,10 @@
       return;
     }
 
-    // NEW: Adjust rate based on current latency while accelerating
-    const currentTargetRate = getOptimalPlaybackRate(effectiveLatencySec);
+    // Adjust rate based on current latency while accelerating
+    const currentTargetRate = getOptimalPlaybackRate(latencySec);
     const shouldStop = (
-      effectiveLatencySec <= threshold.latencySec ||
+      latencySec <= threshold.latencySec ||
       bufferSec <= Math.max(CONFIG.requiredBufferFloorSec, threshold.bufferSec / 2)
     );
 
