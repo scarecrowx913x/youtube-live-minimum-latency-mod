@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.15
+// @version      0.1.0-mod.16
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -24,6 +24,9 @@
  *   - This script only runs on youtube.com.
  *   - It does not use external network requests.
  *   - It does not store personal data.
+ *
+ * v0.1.0-mod.16 Changes:
+ *   - Add acceleration hysteresis, minimum acceleration time, and cooldown
  *
  * v0.1.0-mod.15 Changes:
  *   - Fix snapToAvailableRate snapping down: prefer nearest-above to avoid disabling acceleration
@@ -69,6 +72,9 @@
     maxManualLatencySec: 120,
     seekableFallbackMaxSec: 60,
     requiredBufferFloorSec: 1.0,
+    minAccelerationMs: 8000,
+    accelerationCooldownMs: 5000,
+    stopLatencyMarginSec: 0.75,
     debug: false,
     debugIntervalMs: 2000,
 
@@ -88,6 +94,8 @@
     currentTickMs: null,
     lastUrl: location.href,
     accelerating: false,
+    accelerationStartedAt: 0,
+    lastAccelerationStoppedAt: 0,
     lastDebugAt: 0,
     lastStatus: null,
     playerCache: { value: null, timestamp: 0 },
@@ -438,6 +446,21 @@
     return setPlaybackRate(player, video, rate);
   }
 
+  function getAccelerationElapsedMs(now = Date.now()) {
+    if (!state.accelerating || !state.accelerationStartedAt) {
+      return 0;
+    }
+
+    return now - state.accelerationStartedAt;
+  }
+
+  function isAccelerationCooldownActive(now = Date.now()) {
+    return (
+      state.lastAccelerationStoppedAt > 0 &&
+      now - state.lastAccelerationStoppedAt < CONFIG.accelerationCooldownMs
+    );
+  }
+
   function restartTimer(delayMs) {
     if (state.timerId) {
       clearInterval(state.timerId);
@@ -467,6 +490,9 @@
     }
 
     if (setPlaybackRate(player, video, targetRate)) {
+      if (!state.accelerating) {
+        state.accelerationStartedAt = Date.now();
+      }
       state.accelerating = true;
       updateTickInterval(0);
       log('accelerating to', targetRate, reason);
@@ -484,6 +510,8 @@
 
     if (setPlaybackRate(player, video, CONFIG.normalRate)) {
       state.accelerating = false;
+      state.accelerationStartedAt = 0;
+      state.lastAccelerationStoppedAt = Date.now();
       updateTickInterval(null);
       log('normal speed', reason);
     } else {
@@ -491,7 +519,17 @@
     }
   }
 
+  function shouldStopForLatency(latencySec, threshold, accelerationElapsedMs) {
+    const stopLatencySec = Math.max(0, threshold.latencySec - CONFIG.stopLatencyMarginSec);
+
+    return (
+      accelerationElapsedMs >= CONFIG.minAccelerationMs &&
+      latencySec <= stopLatencySec
+    );
+  }
+
   function handleBufferOnlyFallback(player, video, status) {
+    const now = Date.now();
     const stopBufferSec = Math.max(CONFIG.requiredBufferFloorSec, status.threshold.bufferSec);
     const bufferFallbackRate = snapToAvailableRate(
       CONFIG.accelerationStages[1].playbackRate,
@@ -505,6 +543,16 @@
     }
 
     if (!state.accelerating) {
+      if (isAccelerationCooldownActive(now)) {
+        publishStatus({
+          ...status,
+          reason: 'acceleration-cooldown-buffer-fallback',
+          accelerationCooldownRemainingMs: CONFIG.accelerationCooldownMs - (now - state.lastAccelerationStoppedAt),
+        });
+        updateTickInterval(status.bufferSec);
+        return;
+      }
+
       if (status.bufferSec > status.threshold.bufferSec) {
         const changed = startAcceleration(player, video, bufferFallbackRate, {
           bufferSec: status.bufferSec,
@@ -627,10 +675,17 @@
     const actualPlaybackRate = getActualPlaybackRate(video);
     const playerPlaybackRate = getPlayerPlaybackRate(player);
     const optimalRate = snapToAvailableRate(getOptimalPlaybackRate(latencySec), availableRates);
+    const now = Date.now();
+    const accelerationElapsedMs = getAccelerationElapsedMs(now);
+    const accelerationCooldownRemainingMs = isAccelerationCooldownActive(now)
+      ? CONFIG.accelerationCooldownMs - (now - state.lastAccelerationStoppedAt)
+      : 0;
 
     const status = {
       reason: 'checking',
       accelerating: state.accelerating,
+      accelerationElapsedMs,
+      accelerationCooldownRemainingMs,
       latencySec,
       bufferSec,
       effectiveLatencySec,
@@ -670,6 +725,12 @@
     }
 
     if (!state.accelerating) {
+      if (accelerationCooldownRemainingMs > 0) {
+        publishStatus({ ...status, reason: 'acceleration-cooldown' });
+        updateTickInterval(bufferSec);
+        return;
+      }
+
       if (latencySec > threshold.latencySec && bufferSec >= threshold.bufferSec) {
         const changed = startAcceleration(player, video, optimalRate, {
           latencySec,
@@ -694,20 +755,24 @@
 
     const currentTargetRate = snapToAvailableRate(getOptimalPlaybackRate(latencySec), availableRates);
     const shouldStop = (
-      latencySec <= threshold.latencySec ||
+      shouldStopForLatency(latencySec, threshold, accelerationElapsedMs) ||
       bufferSec <= Math.max(CONFIG.requiredBufferFloorSec, threshold.bufferSec / 2)
     );
 
     if (shouldStop) {
+      const stopLatencySec = Math.max(0, threshold.latencySec - CONFIG.stopLatencyMarginSec);
       stopAcceleration(player, video, {
         latencySec,
         bufferSec,
         effectiveLatencySec,
         threshold,
+        stopLatencySec,
+        accelerationElapsedMs,
       });
       publishStatus({
         ...status,
         reason: 'acceleration-stopped',
+        stopLatencySec,
         actualPlaybackRateAfter: getActualPlaybackRate(video),
         playerPlaybackRateAfter: getPlayerPlaybackRate(player),
       });
@@ -751,6 +816,8 @@
         setPlaybackRate(player, video, CONFIG.normalRate);
       }
       state.accelerating = false;
+      state.accelerationStartedAt = 0;
+      state.lastAccelerationStoppedAt = 0;
     }
     invalidateCaches();
   }
