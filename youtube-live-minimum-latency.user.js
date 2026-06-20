@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.14
+// @version      0.1.0-mod.15
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -24,6 +24,12 @@
  *   - This script only runs on youtube.com.
  *   - It does not use external network requests.
  *   - It does not store personal data.
+ *
+ * v0.1.0-mod.15 Changes:
+ *   - Fix snapToAvailableRate snapping down: prefer nearest-above to avoid disabling acceleration
+ *   - Fix handleNavigateStart: reset playback rate before clearing state.accelerating
+ *   - Fix handleBufferOnlyFallback: apply snapToAvailableRate to buffer-fallback rate
+ *   - Fix waitingTickMs fast-retry: only on watch/live pages, not all YouTube pages
  *
  * v0.1.0-mod.14 Changes:
  *   - Switch @run-at to document-start; add yt-navigate-start cleanup
@@ -364,10 +370,16 @@
     return CONFIG.normalRate;
   }
 
-  // Snap rate to nearest value in availableRates; falls back to rate if list is empty.
+  // Snap rate to nearest available rate >= desired; only falls back to overall nearest if nothing is above.
+  // Prevents snapping down (e.g. 1.1 → 1.0) which would silently disable acceleration.
   function snapToAvailableRate(rate, availableRates) {
     if (!availableRates.length || availableRates.includes(rate)) {
       return rate;
+    }
+
+    const above = availableRates.filter(r => r >= rate);
+    if (above.length) {
+      return above.reduce((prev, curr) => curr < prev ? curr : prev);
     }
 
     return availableRates.reduce((prev, curr) =>
@@ -481,6 +493,10 @@
 
   function handleBufferOnlyFallback(player, video, status) {
     const stopBufferSec = Math.max(CONFIG.requiredBufferFloorSec, status.threshold.bufferSec);
+    const bufferFallbackRate = snapToAvailableRate(
+      CONFIG.accelerationStages[1].playbackRate,
+      status.availableRates
+    );
 
     if (!isPlainLivePlayback(player, video, getVideoStats(player))) {
       publishStatus({ ...status, reason: 'latency-unavailable' });
@@ -490,7 +506,7 @@
 
     if (!state.accelerating) {
       if (status.bufferSec > status.threshold.bufferSec) {
-        const changed = startAcceleration(player, video, CONFIG.accelerationStages[1].playbackRate, {
+        const changed = startAcceleration(player, video, bufferFallbackRate, {
           bufferSec: status.bufferSec,
           threshold: status.threshold,
           fallback: 'buffer-only',
@@ -524,7 +540,7 @@
       return;
     }
 
-    const enforced = enforcePlaybackRate(player, video, CONFIG.accelerationStages[1].playbackRate);
+    const enforced = enforcePlaybackRate(player, video, bufferFallbackRate);
     publishStatus({
       ...status,
       reason: enforced ? 'accelerating-continued-buffer-fallback' : 'accelerating-rate-enforce-failed-buffer-fallback',
@@ -575,8 +591,9 @@
 
     if (!player || !video) {
       publishStatus({ reason: 'waiting-player-or-video', hasPlayer: Boolean(player), hasVideo: Boolean(video) });
-      // Poll frequently until DOM is ready
-      if (state.currentTickMs !== CONFIG.waitingTickMs) {
+      // Fast retry only on watch pages; elsewhere keep the idle interval to avoid CPU churn
+      const isWatchPage = location.pathname === '/watch' || location.pathname.startsWith('/live/');
+      if (isWatchPage && state.currentTickMs !== CONFIG.waitingTickMs) {
         restartTimer(CONFIG.waitingTickMs);
       }
       return;
@@ -726,8 +743,15 @@
 
   function handleNavigateStart() {
     cleanupVideoListeners();
-    // Reset acceleration state without touching the player (it may already be gone)
-    state.accelerating = false;
+    // Reset playback rate before the player may disappear, then clear state
+    if (state.accelerating) {
+      const player = getPlayer();
+      const video = getVideo(player);
+      if (player && video) {
+        setPlaybackRate(player, video, CONFIG.normalRate);
+      }
+      state.accelerating = false;
+    }
     invalidateCaches();
   }
 
