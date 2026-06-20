@@ -2,11 +2,11 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.13
+// @version      0.1.0-mod.14
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
-// @run-at       document-idle
+// @run-at       document-start
 // @noframes
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js
@@ -25,6 +25,12 @@
  *   - It does not use external network requests.
  *   - It does not store personal data.
  *
+ * v0.1.0-mod.14 Changes:
+ *   - Switch @run-at to document-start; add yt-navigate-start cleanup
+ *   - Fast retry when player/video not yet in DOM
+ *   - Snap acceleration rate to YouTube-supported values via getAvailablePlaybackRates()
+ *   - Track video element and handlers in state; remove old listeners on video replacement
+ *
  * v0.1.0-mod.13 Changes:
  *   - Fix multi-stage playback rate selection order
  *   - Use actual latency for acceleration decisions instead of latency + buffer
@@ -39,7 +45,6 @@
   'use strict';
 
   const DEBUG_STORAGE_KEY = 'yt_lml_debug';
-  const VIDEO_LISTENER_KEY = '__ytLmlVideoListenersAttached';
   const PLAYER_CACHE_KEY = '__ytLmlPlayerCache';
   const VIDEO_CACHE_KEY = '__ytLmlVideoCache';
 
@@ -53,7 +58,8 @@
     ]),
     idleTickMs: 60 * 1000,
     activeTickMs: 500,
-    bufferLowTickMs: 2000, // Increased polling when buffer is low
+    bufferLowTickMs: 2000,
+    waitingTickMs: 500, // fast retry when player/video not yet in DOM
     maxManualLatencySec: 120,
     seekableFallbackMaxSec: 60,
     requiredBufferFloorSec: 1.0,
@@ -68,7 +74,6 @@
       unknown: Object.freeze({ latencySec: 3.0, bufferSec: 2.0 }),
     }),
 
-    // Cache TTL to reduce redundant DOM queries
     cacheTtlMs: 100,
   });
 
@@ -79,11 +84,11 @@
     accelerating: false,
     lastDebugAt: 0,
     lastStatus: null,
-    // Cache with timestamp
     playerCache: { value: null, timestamp: 0 },
     videoCache: { value: null, timestamp: 0 },
-    // Event listener cleanup tracking
-    eventListenersAttached: false,
+    // Video element and its bound handlers for explicit removal
+    currentVideo: null,
+    videoHandlers: null,
   };
 
   function isDebugEnabled() {
@@ -112,7 +117,6 @@
     console.debug('[YT Live Minimum Latency] status', status);
   }
 
-  // Cached player getter to reduce DOM queries
   function getPlayer() {
     const now = Date.now();
     if (now - state.playerCache.timestamp < CONFIG.cacheTtlMs && state.playerCache.value) {
@@ -124,7 +128,6 @@
     return player;
   }
 
-  // Cached video getter to reduce DOM queries
   function getVideo(player = getPlayer()) {
     const now = Date.now();
     if (now - state.videoCache.timestamp < CONFIG.cacheTtlMs && state.videoCache.value) {
@@ -361,6 +364,17 @@
     return CONFIG.normalRate;
   }
 
+  // Snap rate to nearest value in availableRates; falls back to rate if list is empty.
+  function snapToAvailableRate(rate, availableRates) {
+    if (!availableRates.length || availableRates.includes(rate)) {
+      return rate;
+    }
+
+    return availableRates.reduce((prev, curr) =>
+      Math.abs(curr - rate) < Math.abs(prev - rate) ? curr : prev
+    );
+  }
+
   function getAvailablePlaybackRates(player) {
     const rates = callPlayer(player, 'getAvailablePlaybackRates');
     return Array.isArray(rates) ? rates : [];
@@ -421,15 +435,12 @@
     state.timerId = window.setInterval(tick, delayMs);
   }
 
-  // NEW: Dynamic tick interval based on state
   function updateTickInterval(bufferSec) {
     let nextTickMs = CONFIG.idleTickMs;
 
     if (state.accelerating) {
-      // When accelerating, poll more frequently
       nextTickMs = CONFIG.activeTickMs;
     } else if (Number.isFinite(bufferSec) && bufferSec < CONFIG.requiredBufferFloorSec * 2) {
-      // When buffer is low (but not accelerating yet), poll more frequently
       nextTickMs = CONFIG.bufferLowTickMs;
     }
 
@@ -440,12 +451,12 @@
 
   function startAcceleration(player, video, targetRate, reason) {
     if (state.accelerating && Math.abs(getActualPlaybackRate(video) - targetRate) <= 0.01) {
-      return true; // Already at target rate
+      return true;
     }
 
     if (setPlaybackRate(player, video, targetRate)) {
       state.accelerating = true;
-      updateTickInterval(0); // Will be updated on next tick
+      updateTickInterval(0);
       log('accelerating to', targetRate, reason);
       return true;
     }
@@ -522,22 +533,40 @@
     });
   }
 
-  function ensureVideoListeners(video) {
-    if (!video || video[VIDEO_LISTENER_KEY]) {
+  function cleanupVideoListeners() {
+    const { currentVideo, videoHandlers } = state;
+    if (!currentVideo || !videoHandlers) {
       return;
     }
 
-    video[VIDEO_LISTENER_KEY] = true;
-    video.addEventListener('playing', tick, false);
-    video.addEventListener('play', tick, false);
+    currentVideo.removeEventListener('playing', videoHandlers.onPlay, false);
+    currentVideo.removeEventListener('play', videoHandlers.onPlay, false);
+    currentVideo.removeEventListener('ended', videoHandlers.onEnded, false);
+    state.currentVideo = null;
+    state.videoHandlers = null;
+  }
 
-    // Cleanup listeners on video end/pause to prevent memory leaks
-    const cleanupHandler = () => {
-      invalidateCaches();
-      tick();
-    };
+  function ensureVideoListeners(video) {
+    if (!video) {
+      return;
+    }
 
-    video.addEventListener('ended', cleanupHandler, false);
+    if (state.currentVideo === video) {
+      return;
+    }
+
+    // Video element changed — remove old listeners first
+    cleanupVideoListeners();
+
+    const onPlay = () => tick();
+    const onEnded = () => { invalidateCaches(); tick(); };
+
+    video.addEventListener('playing', onPlay, false);
+    video.addEventListener('play', onPlay, false);
+    video.addEventListener('ended', onEnded, false);
+
+    state.currentVideo = video;
+    state.videoHandlers = { onPlay, onEnded };
   }
 
   function tick() {
@@ -546,6 +575,10 @@
 
     if (!player || !video) {
       publishStatus({ reason: 'waiting-player-or-video', hasPlayer: Boolean(player), hasVideo: Boolean(video) });
+      // Poll frequently until DOM is ready
+      if (state.currentTickMs !== CONFIG.waitingTickMs) {
+        restartTimer(CONFIG.waitingTickMs);
+      }
       return;
     }
 
@@ -576,7 +609,7 @@
     const availableRates = getAvailablePlaybackRates(player);
     const actualPlaybackRate = getActualPlaybackRate(video);
     const playerPlaybackRate = getPlayerPlaybackRate(player);
-    const optimalRate = getOptimalPlaybackRate(latencySec);
+    const optimalRate = snapToAvailableRate(getOptimalPlaybackRate(latencySec), availableRates);
 
     const status = {
       reason: 'checking',
@@ -642,8 +675,7 @@
       return;
     }
 
-    // Adjust rate based on current latency while accelerating
-    const currentTargetRate = getOptimalPlaybackRate(latencySec);
+    const currentTargetRate = snapToAvailableRate(getOptimalPlaybackRate(latencySec), availableRates);
     const shouldStop = (
       latencySec <= threshold.latencySec ||
       bufferSec <= Math.max(CONFIG.requiredBufferFloorSec, threshold.bufferSec / 2)
@@ -665,7 +697,6 @@
       return;
     }
 
-    // Adjust rate mid-acceleration if latency changed significantly
     if (Math.abs(currentTargetRate - actualPlaybackRate) > 0.01) {
       enforcePlaybackRate(player, video, currentTargetRate);
       publishStatus({
@@ -693,6 +724,13 @@
     tick();
   }
 
+  function handleNavigateStart() {
+    cleanupVideoListeners();
+    // Reset acceleration state without touching the player (it may already be gone)
+    state.accelerating = false;
+    invalidateCaches();
+  }
+
   function resetForNavigation() {
     const player = getPlayer();
     const video = getVideo(player);
@@ -704,6 +742,7 @@
   }
 
   function watchUrlChanges() {
+    document.addEventListener('yt-navigate-start', handleNavigateStart, false);
     document.addEventListener('yt-navigate-finish', resetForNavigation, false);
 
     window.setInterval(() => {
@@ -713,8 +752,8 @@
     }, 1000);
   }
 
-  // Cleanup on page unload
   window.addEventListener('beforeunload', () => {
+    cleanupVideoListeners();
     if (state.timerId) {
       clearInterval(state.timerId);
     }
