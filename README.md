@@ -6,7 +6,7 @@ YouTube Live の遅延を小さくするための Userscript です。
 * 遅延の大きさに応じて段階的に加速（1.1x → 1.15x → 1.25x）
 * ライブ位置に近づいたら、自動で `1.0x` に戻す
 * バッファに余裕があるときだけ加速する
-* 低バッファ時により頻繁に状態をチェック（パフォーマンス最適化）
+* 低バッファ時は加速を弱め、バッファ不足時は早めに通常速度へ戻す
 * YouTube の画面遷移に対応する
 * 外部通信なし、個人情報の保存なし
 
@@ -21,10 +21,10 @@ YouTube Live を見ているときに、気づかないうちにライブ位置�
 
 2. 以下のリンクをクリック
 
-   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.13)
+   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.17)
 
 **コピペ用URL**  
-https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.13
+https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.17
 
 3. Userscript マネージャのインストール画面が出るので、「インストール」を選ぶ
 
@@ -51,6 +51,7 @@ YTLiveMinimumLatency.getStatus()
 ```
 
 `reason` が `accelerating-started`、`accelerating-continued`、`accelerating-rate-adjusted`、`accelerating-started-buffer-fallback`、`accelerating-continued-buffer-fallback` などになっていれば、加速判定中です。
+`cooldown-active`、`starvation-cooldown-started`、`acceleration-stopped-buffer-rate-cap-fallback` などの場合は、バッファ不足を避けるために加速を止めています。
 
 実際の再生速度は以下で確認できます。
 
@@ -69,7 +70,7 @@ document.querySelector('video').playbackRate
 * ライブ配信かどうかを確認する
 * 現在位置とライブ位置の差を確認する
 * バッファ量を確認する
-* 遅延度に応じて最適な再生速度を決定する
+* 遅延度とバッファ量に応じて安全な再生速度を決定する
 * 条件を満たした場合だけ再生速度を上げる
 * 条件を外れたら通常速度に戻す
 
@@ -85,6 +86,7 @@ document.querySelector('video').playbackRate
 | 10秒以上 | 1.25x   | 大きな遅れに対応 |
 
 YouTube の環境によっては Live Latency が直接取得できないため、Buffer Health を使って補助判定します。
+また、利用可能な再生速度と現在のバッファ量に応じて、実際に適用する速度を安全側へ丸めます。
 
 ### ポーリング間隔の動的調整
 
@@ -95,6 +97,11 @@ YouTube の環境によっては Live Latency が直接取得できないため�
 * **バッファ低下時**: 約2秒ごと（バッファ不足に早期に対応）
 
 再生開始時やYouTube内のページ移動時は、待たずにすぐ確認します。視聴者が意図的に大きく巻き戻して見ている可能性がある場合は、無理に追いつこうとしないようにしています。
+
+### バッファ保護
+
+低遅延ライブではバッファが少ない状態で加速すると、再生位置がバッファ末尾に追いついて読み込み待ちになることがあります。
+このスクリプトは、バッファ量が少ないときは加速率を抑え、`waiting` や `stalled` などの読み込み待ちイベントを検出した場合は一時的に加速を停止します。
 
 ### パフォーマンス最適化
 
@@ -135,7 +142,7 @@ LICENSE
 * YouTube Live のページでスクリプトが有効になっているか確認してください。
 * 通常動画ではなく、ライブ配信で確認してください。
 * Console で `YTLiveMinimumLatency.getStatus()` を実行して状態を確認してください。
-* `optimalRate` フィールドで、現在の最適加速レートを確認できます。
+* `optimalRate` フィールドで遅延基準の加速レート、`safeOptimalRate` フィールドで実際に適用しようとしている安全側の加速レートを確認できます。
 * 配信やYouTube側の仕様によって、加速条件を満たさない場合があります。
 
 ### 再生速度が変わらない場合
@@ -148,6 +155,7 @@ LICENSE
 
 * ライブ位置に追いつくと、自動で通常速度に戻ります。
 * バッファが不足すると、再生を優先するため加速を停止します。
+* 読み込み待ちが発生した場合は、短いクールダウン後に再判定します。
 * ライブ配信が終了した場合も加速が停止します。
 
 ---
@@ -158,6 +166,37 @@ LICENSE
 YouTube 側の仕様変更により、動作しなくなったり、配信によって挙動が変わったりする場合があります。
 
 また、ライブ配信の種類や遅延設定によって、必ずライブ位置へ追いつけるとは限りません。
+
+---
+
+## v0.1.0-mod.17 の改善点
+
+### 修正
+* **バッファ量に応じた加速率制限**: バッファが少ないときは `1.1x` まで、さらに少ないときは加速しないように変更
+* **低バッファ時の停止判定を強化**: バッファが不足する前に通常速度へ戻し、読み込み待ちを起こしにくく変更
+* **読み込み待ちイベントへの対応**: `waiting` / `stalled` 検出時に加速を止め、短いクールダウンを挟んでから再判定
+* **Buffer Health fallback の安全化**: Live Latency が取得できない場合も固定 `1.15x` ではなく、バッファ量に応じた安全な速度を使うように変更
+
+### 継続機能
+* **段階的な加速レート**: 遅延の大きさに応じて 1.1x → 1.15x → 1.25x に自動調整
+* **加速中の動的レート調整**: 遅延やバッファ量が変化した場合、その場で安全なレートに変更
+* **動的ポーリング間隔**: 通常(60秒) / 加速中(0.5秒) / バッファ低下時(2秒)
+
+---
+
+## v0.1.0-mod.14 の改善点
+
+### 修正
+* **再生速度を利用可能な値へ正規化**: `getAvailablePlaybackRates()` を使い、非標準レートが戻される環境でも加速を維持しやすく変更
+* **初期化タイミングを改善**: `document-start` で起動し、プレイヤーや video 要素が未準備の間は短い間隔で再試行
+* **YouTube内遷移の後始末を強化**: `yt-navigate-start` や video 要素差し替え時に古いリスナーを外し、状態をリセット
+
+### 継続機能
+* **段階的な加速レート**: 遅延の大きさに応じて 1.1x → 1.15x → 1.25x に自動調整
+* **加速中の動的レート調整**: 遅延が変化した場合、その場で最適なレートに変更
+* **DOM クエリキャッシング**: 不要な DOM 操作を削減（キャッシュ有効期限: 100ms）
+* **動的ポーリング間隔**: 通常(60秒) / 加速中(0.5秒) / バッファ低下時(2秒)
+* **メモリリーク防止**: イベントリスナーの適切なクリーンアップ、ページ離脱時のタイマークリア
 
 ---
 

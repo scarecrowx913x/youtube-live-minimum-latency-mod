@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.16
+// @version      0.1.0-mod.17
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -24,6 +24,11 @@
  *   - This script only runs on youtube.com.
  *   - It does not use external network requests.
  *   - It does not store personal data.
+ *
+ * v0.1.0-mod.17 Changes:
+ *   - Add buffer-aware playback rate caps and safer stop thresholds to avoid
+ *     outrunning the live buffer on low-latency streams.
+ *   - Stop acceleration after starvation-related media events.
  *
  * v0.1.0-mod.16 Changes:
  *   - Add acceleration hysteresis, minimum acceleration time, and cooldown
@@ -75,8 +80,17 @@
     minAccelerationMs: 8000,
     accelerationCooldownMs: 5000,
     stopLatencyMarginSec: 0.75,
+    startBufferMarginSec: 0.5,
+    selfRateChangeIgnoreMs: 1000,
     debug: false,
     debugIntervalMs: 2000,
+
+    bufferRateCaps: Object.freeze([
+      { bufferThreshold: 1.5, maxPlaybackRate: 1.0 },
+      { bufferThreshold: 3.0, maxPlaybackRate: 1.1 },
+      { bufferThreshold: 5.0, maxPlaybackRate: 1.15 },
+      { bufferThreshold: Infinity, maxPlaybackRate: 1.25 },
+    ]),
 
     thresholds: Object.freeze({
       ultraLow: Object.freeze({ latencySec: 2.0, bufferSec: 1.0 }),
@@ -98,6 +112,8 @@
     lastAccelerationStoppedAt: 0,
     lastDebugAt: 0,
     lastStatus: null,
+    lastRequestedRate: null,
+    lastRateSetAt: 0,
     playerCache: { value: null, timestamp: 0 },
     videoCache: { value: null, timestamp: 0 },
     // Video element and its bound handlers for explicit removal
@@ -397,7 +413,43 @@
 
   function getAvailablePlaybackRates(player) {
     const rates = callPlayer(player, 'getAvailablePlaybackRates');
-    return Array.isArray(rates) ? rates : [];
+    return Array.isArray(rates)
+      ? rates.map(Number).filter((rate) => Number.isFinite(rate) && rate > 0).sort((a, b) => a - b)
+      : [];
+  }
+
+  function getHighestAvailableRateAtOrBelow(availableRates, targetRate) {
+    if (!availableRates.length) {
+      return targetRate;
+    }
+
+    const safeRate = availableRates
+      .filter((rate) => rate <= targetRate + 0.001)
+      .at(-1);
+
+    return Number.isFinite(safeRate) ? safeRate : CONFIG.normalRate;
+  }
+
+  function getMaxPlaybackRateForBuffer(bufferSec) {
+    if (!Number.isFinite(bufferSec)) {
+      return CONFIG.normalRate;
+    }
+
+    const cap = CONFIG.bufferRateCaps.find((entry) => bufferSec < entry.bufferThreshold);
+    return cap?.maxPlaybackRate ?? CONFIG.normalRate;
+  }
+
+  function getSafePlaybackRateFromAvailableRates(availableRates, requestedRate, bufferSec) {
+    const bufferCappedRate = Math.min(requestedRate, getMaxPlaybackRateForBuffer(bufferSec));
+    return getHighestAvailableRateAtOrBelow(availableRates, bufferCappedRate);
+  }
+
+  function getStartBufferThresholdSec(threshold) {
+    return threshold.bufferSec + CONFIG.startBufferMarginSec;
+  }
+
+  function getStopBufferThresholdSec(threshold) {
+    return Math.max(CONFIG.requiredBufferFloorSec, threshold.bufferSec);
   }
 
   function getPlayerPlaybackRate(player) {
@@ -432,6 +484,9 @@
   }
 
   function setPlaybackRate(player, video, rate) {
+    state.lastRequestedRate = rate;
+    state.lastRateSetAt = Date.now();
+
     callPlayer(player, 'setPlaybackRate', rate);
     setVideoPlaybackRate(video, rate);
 
@@ -530,10 +585,12 @@
 
   function handleBufferOnlyFallback(player, video, status) {
     const now = Date.now();
-    const stopBufferSec = Math.max(CONFIG.requiredBufferFloorSec, status.threshold.bufferSec);
-    const bufferFallbackRate = snapToAvailableRate(
+    const startBufferSec = getStartBufferThresholdSec(status.threshold);
+    const stopBufferSec = getStopBufferThresholdSec(status.threshold);
+    const targetRate = getSafePlaybackRateFromAvailableRates(
+      status.availableRates,
       CONFIG.accelerationStages[1].playbackRate,
-      status.availableRates
+      status.bufferSec
     );
 
     if (!isPlainLivePlayback(player, video, getVideoStats(player))) {
@@ -553,9 +610,11 @@
         return;
       }
 
-      if (status.bufferSec > status.threshold.bufferSec) {
-        const changed = startAcceleration(player, video, bufferFallbackRate, {
+      if (status.bufferSec >= startBufferSec && targetRate > CONFIG.normalRate) {
+        const changed = startAcceleration(player, video, targetRate, {
           bufferSec: status.bufferSec,
+          startBufferSec,
+          targetRate,
           threshold: status.threshold,
           fallback: 'buffer-only',
         });
@@ -588,7 +647,23 @@
       return;
     }
 
-    const enforced = enforcePlaybackRate(player, video, bufferFallbackRate);
+    if (targetRate <= CONFIG.normalRate) {
+      stopAcceleration(player, video, {
+        bufferSec: status.bufferSec,
+        targetRate,
+        threshold: status.threshold,
+        fallback: 'buffer-only-rate-capped',
+      });
+      publishStatus({
+        ...status,
+        reason: 'acceleration-stopped-buffer-rate-cap-fallback',
+        actualPlaybackRateAfter: getActualPlaybackRate(video),
+        playerPlaybackRateAfter: getPlayerPlaybackRate(player),
+      });
+      return;
+    }
+
+    const enforced = enforcePlaybackRate(player, video, targetRate);
     publishStatus({
       ...status,
       reason: enforced ? 'accelerating-continued-buffer-fallback' : 'accelerating-rate-enforce-failed-buffer-fallback',
@@ -606,8 +681,75 @@
     currentVideo.removeEventListener('playing', videoHandlers.onPlay, false);
     currentVideo.removeEventListener('play', videoHandlers.onPlay, false);
     currentVideo.removeEventListener('ended', videoHandlers.onEnded, false);
+    currentVideo.removeEventListener('waiting', videoHandlers.onWaiting, false);
+    currentVideo.removeEventListener('stalled', videoHandlers.onStalled, false);
+    currentVideo.removeEventListener('seeking', videoHandlers.onSeeking, false);
+    currentVideo.removeEventListener('ratechange', videoHandlers.onRateChange, false);
     state.currentVideo = null;
     state.videoHandlers = null;
+  }
+
+  function stopForStarvationEvent(eventType) {
+    const player = getPlayer();
+    const video = getVideo(player);
+    const wasAccelerating = state.accelerating;
+
+    if (player && video) {
+      stopAcceleration(player, video, eventType);
+      if (!wasAccelerating) {
+        state.lastAccelerationStoppedAt = Date.now();
+      }
+      updateTickInterval(getBufferedAheadSec(video, getVideoStats(player)));
+    } else {
+      state.lastAccelerationStoppedAt = Date.now();
+    }
+
+    publishStatus({
+      ...(state.lastStatus || {}),
+      reason: 'starvation-cooldown-started',
+      eventType,
+      accelerationCooldownRemainingMs: CONFIG.accelerationCooldownMs,
+      actualPlaybackRateAfter: getActualPlaybackRate(video),
+      playerPlaybackRateAfter: getPlayerPlaybackRate(player),
+    });
+  }
+
+  function handleSeekingEvent() {
+    const player = getPlayer();
+    const video = getVideo(player);
+    const wasAccelerating = state.accelerating;
+
+    if (player && video) {
+      stopAcceleration(player, video, 'seeking');
+      if (!wasAccelerating) {
+        state.lastAccelerationStoppedAt = Date.now();
+      }
+    } else {
+      state.lastAccelerationStoppedAt = Date.now();
+    }
+
+    invalidateCaches();
+    tick();
+  }
+
+  function handleRateChangeEvent() {
+    if (Date.now() - state.lastRateSetAt <= CONFIG.selfRateChangeIgnoreMs) {
+      return;
+    }
+
+    const player = getPlayer();
+    const video = getVideo(player);
+    const actualRate = getActualPlaybackRate(video);
+
+    if (state.accelerating && Math.abs(actualRate - state.lastRequestedRate) > 0.01) {
+      stopAcceleration(player, video, 'external-ratechange');
+      publishStatus({
+        ...(state.lastStatus || {}),
+        reason: 'external-ratechange-cooldown-started',
+        actualPlaybackRateAfter: getActualPlaybackRate(video),
+        playerPlaybackRateAfter: getPlayerPlaybackRate(player),
+      });
+    }
   }
 
   function ensureVideoListeners(video) {
@@ -624,13 +766,21 @@
 
     const onPlay = () => tick();
     const onEnded = () => { invalidateCaches(); tick(); };
+    const onWaiting = () => stopForStarvationEvent('waiting');
+    const onStalled = () => stopForStarvationEvent('stalled');
+    const onSeeking = () => handleSeekingEvent();
+    const onRateChange = () => handleRateChangeEvent();
 
     video.addEventListener('playing', onPlay, false);
     video.addEventListener('play', onPlay, false);
     video.addEventListener('ended', onEnded, false);
+    video.addEventListener('waiting', onWaiting, false);
+    video.addEventListener('stalled', onStalled, false);
+    video.addEventListener('seeking', onSeeking, false);
+    video.addEventListener('ratechange', onRateChange, false);
 
     state.currentVideo = video;
-    state.videoHandlers = { onPlay, onEnded };
+    state.videoHandlers = { onPlay, onEnded, onWaiting, onStalled, onSeeking, onRateChange };
   }
 
   function tick() {
@@ -674,7 +824,10 @@
     const availableRates = getAvailablePlaybackRates(player);
     const actualPlaybackRate = getActualPlaybackRate(video);
     const playerPlaybackRate = getPlayerPlaybackRate(player);
-    const optimalRate = snapToAvailableRate(getOptimalPlaybackRate(latencySec), availableRates);
+    const optimalRate = getOptimalPlaybackRate(latencySec);
+    const safeOptimalRate = getSafePlaybackRateFromAvailableRates(availableRates, optimalRate, bufferSec);
+    const startBufferSec = getStartBufferThresholdSec(threshold);
+    const stopBufferSec = getStopBufferThresholdSec(threshold);
     const now = Date.now();
     const accelerationElapsedMs = getAccelerationElapsedMs(now);
     const accelerationCooldownRemainingMs = isAccelerationCooldownActive(now)
@@ -690,6 +843,9 @@
       bufferSec,
       effectiveLatencySec,
       optimalRate,
+      safeOptimalRate,
+      startBufferSec,
+      stopBufferSec,
       threshold,
       playbackRate: actualPlaybackRate,
       videoPlaybackRate: actualPlaybackRate,
@@ -731,12 +887,14 @@
         return;
       }
 
-      if (latencySec > threshold.latencySec && bufferSec >= threshold.bufferSec) {
-        const changed = startAcceleration(player, video, optimalRate, {
+      if (latencySec > threshold.latencySec && bufferSec >= startBufferSec && safeOptimalRate > CONFIG.normalRate) {
+        const changed = startAcceleration(player, video, safeOptimalRate, {
           latencySec,
           bufferSec,
           effectiveLatencySec,
           optimalRate,
+          safeOptimalRate,
+          startBufferSec,
           threshold,
         });
         publishStatus({
@@ -753,10 +911,11 @@
       return;
     }
 
-    const currentTargetRate = snapToAvailableRate(getOptimalPlaybackRate(latencySec), availableRates);
+    const currentTargetRate = getSafePlaybackRateFromAvailableRates(availableRates, getOptimalPlaybackRate(latencySec), bufferSec);
     const shouldStop = (
       shouldStopForLatency(latencySec, threshold, accelerationElapsedMs) ||
-      bufferSec <= Math.max(CONFIG.requiredBufferFloorSec, threshold.bufferSec / 2)
+      bufferSec <= stopBufferSec ||
+      currentTargetRate <= CONFIG.normalRate
     );
 
     if (shouldStop) {
@@ -765,6 +924,7 @@
         latencySec,
         bufferSec,
         effectiveLatencySec,
+        currentTargetRate,
         threshold,
         stopLatencySec,
         accelerationElapsedMs,
