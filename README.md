@@ -53,7 +53,7 @@ YouTube Live のページで開発者ツールの Console を開き、以下を�
 YTLiveMinimumLatency.getStatus()
 ```
 
-`reason` が `accelerating-started`、`accelerating-continued`、`accelerating-rate-adjusted`、`accelerating-started-buffer-fallback`、`accelerating-continued-buffer-fallback` などになっていれば、加速判定中です。
+`reason` が `accelerating-started`、`accelerating-continued`、`acceleration-rate-adjusted`、`accelerating-started-buffer-fallback`、`accelerating-continued-buffer-fallback` などになっていれば、加速判定中です。
 
 `acceleration-cooldown`、`acceleration-cooldown-buffer-fallback`、`starvation-cooldown-started`、`acceleration-stopped-buffer-rate-cap-fallback` などの場合は、再加速を待っているか、バッファ保護により加速を止めています。
 
@@ -82,14 +82,16 @@ document.querySelector('video').playbackRate
 
 ### 段階的な加速レート
 
-遅延が大きくなるほど、より強く加速します：
+遅延が大きくなるほど、より強い目標再生速度を選びます。
 
-| 遅延時間 | 再生速度 | 用途 |
-|---------|---------|------|
-| 0-3秒   | 1.0x    | 通常速度 |
-| 3-5秒   | 1.1x    | 軽度の遅れに対応 |
-| 5-10秒  | 1.15x   | 中程度の遅れに対応 |
-| 10秒以上 | 1.25x   | 大きな遅れに対応 |
+| 遅延時間 | 目標再生速度 | 用途 |
+|---------|-------------|------|
+| 0-3秒   | 1.0x        | 通常速度 |
+| 3-5秒   | 1.1x        | 軽度の遅れに対応 |
+| 5-10秒  | 1.15x       | 中程度の遅れに対応 |
+| 10秒以上 | 1.25x      | 大きな遅れに対応 |
+
+この表は遅延量から決まる**目標再生速度**です。実際に加速を開始するかどうかは、YouTube が示す遅延クラス（Ultra Low / Low / Normal / Premiere）、現在のバッファ量、利用可能な再生速度、クールダウン状態なども含めて判定します。
 
 YouTube の環境によっては Live Latency が直接取得できないため、通常のライブ配信と判定できる場合に限り Buffer Health を補助判定として使います。
 DVRやPremiereなどでは、Live Latencyを取得できない状態からBuffer Healthだけで追いつこうとしません。
@@ -135,6 +137,22 @@ https://www.youtube.com/*
 youtube-live-minimum-latency.user.js
 README.md
 LICENSE
+.github/
+  workflows/
+    validate.yml
+test/
+  navigation-regression.test.js
+  playback-regression.test.js
+```
+
+### 開発・回帰テスト
+
+GitHub Actions では Node.js 22 を使い、Userscript の構文チェックと回帰テストを実行します。
+ローカルでも同じ確認ができます。
+
+```bash
+node --check youtube-live-minimum-latency.user.js
+node --test test/*.test.js
 ```
 
 ---
