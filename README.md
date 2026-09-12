@@ -22,10 +22,10 @@ YouTube Live を見ているときに、気づかないうちにライブ位置�
 
 2. 以下のリンクをクリック
 
-   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.19)
+   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.20)
 
 **コピペ用URL**  
-https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.19
+https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.20
 
 3. Userscript マネージャのインストール画面が出るので、「インストール」を選ぶ
 
@@ -116,7 +116,8 @@ DVRやPremiereなどでは、Live Latencyを取得できない状態からBuffer
 
 * **DOM クエリのキャッシング**: 連続したクエリを避け、100ms のキャッシュを使用
 * **メモリリーク防止**: イベントリスナーの適切なクリーンアップ
-* **効率的なキャッシュ無効化**: ページ遷移時のみキャッシュをリセット
+* **効率的なキャッシュ無効化**: ページ遷移時とvideo要素差し替え時にキャッシュをリセット
+* **video差し替え検知**: 既存の1秒監視でDOMから切断されたvideo要素を検知し、新しいvideoへ再接続
 
 ---
 
@@ -178,6 +179,17 @@ LICENSE
 YouTube 側の仕様変更により、動作しなくなったり、配信によって挙動が変わったりする場合があります。
 
 また、ライブ配信の種類や遅延設定によって、必ずライブ位置へ追いつけるとは限りません。
+
+---
+
+## v0.1.0-mod.20 の改善点
+
+### 修正
+* **SPA遷移時の状態リセットを強化**: 加速状態、停止後cooldown、自己変更した再生速度の追跡状態を次の動画へ持ち越さないよう整理
+* **URL監視フォールバックでもcleanup**: `yt-navigate-start` を取り逃した場合でも旧videoのイベントリスナーを解除
+* **video差し替えの再検出を高速化**: 同一URLで旧videoがDOMから外れた場合、既存の1秒監視で新videoへ再bind
+* **終了時cleanupを追加**: `beforeunload` でURL監視timerも解除
+* **回帰テスト追加**: SPA遷移、URL変更フォールバック、同一URLのvideo差し替えを自動テスト
 
 ---
 
