@@ -17,6 +17,7 @@ function createScenario({
   playbackRate = 1,
 } = {}) {
   const videoListeners = new Map();
+  const timerDelays = [];
   let timerId = 0;
 
   const stats = {
@@ -90,8 +91,9 @@ function createScenario({
       setItem() {},
       removeItem() {},
     },
-    setInterval() {
+    setInterval(_handler, delayMs) {
       timerId += 1;
+      timerDelays.push(delayMs);
       return timerId;
     },
     addEventListener() {},
@@ -117,6 +119,12 @@ function createScenario({
     player,
     video,
     stats,
+    setBufferSec(nextBufferSec) {
+      stats.vbu = `0-${currentTime + nextBufferSec}`;
+    },
+    getLastTimerDelay() {
+      return timerDelays.at(-1);
+    },
     getStatus() {
       return window.YTLiveMinimumLatency.getStatus();
     },
@@ -229,4 +237,41 @@ test('starvation stops acceleration and starts cooldown', () => {
   scenario.video.emit('playing');
   assert.equal(scenario.getStatus().reason, 'acceleration-cooldown');
   assert.equal(scenario.video.playbackRate, 1);
+});
+
+test('low-buffer stop switches to the 2 second recovery polling interval', () => {
+  const scenario = createScenario({
+    latencySec: 6,
+    bufferSec: 6,
+    availableRates: [1, 1.15, 1.25],
+  });
+
+  assert.equal(scenario.video.playbackRate, 1.15);
+  assert.equal(scenario.getLastTimerDelay(), 500);
+
+  scenario.setBufferSec(1.5);
+  scenario.video.emit('playing');
+
+  assert.equal(scenario.getStatus().reason, 'acceleration-stopped');
+  assert.equal(scenario.video.playbackRate, 1);
+  assert.equal(scenario.getLastTimerDelay(), 2000);
+});
+
+test('buffer-only fallback low-buffer stop also keeps recovery polling fast', () => {
+  const scenario = createScenario({
+    live: 'live',
+    latencySec: null,
+    bufferSec: 8,
+    availableRates: [1, 1.15, 1.25],
+  });
+
+  assert.equal(scenario.video.playbackRate, 1.15);
+  assert.equal(scenario.getLastTimerDelay(), 500);
+
+  scenario.setBufferSec(1.5);
+  scenario.video.emit('playing');
+
+  assert.equal(scenario.getStatus().reason, 'acceleration-stopped-buffer-fallback');
+  assert.equal(scenario.video.playbackRate, 1);
+  assert.equal(scenario.getLastTimerDelay(), 2000);
 });
