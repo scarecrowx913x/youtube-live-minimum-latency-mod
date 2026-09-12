@@ -7,6 +7,7 @@ YouTube Live の遅延を小さくするための Userscript です。
 * ライブ位置に近づいたら、自動で `1.0x` に戻す
 * バッファに余裕があるときだけ加速する
 * 低バッファ時は加速を弱め、バッファ不足時は早めに通常速度へ戻す
+* 手動で再生速度を変更した場合は、その速度を優先する
 * YouTube の画面遷移に対応する
 * 外部通信なし、個人情報の保存なし
 
@@ -21,10 +22,10 @@ YouTube Live を見ているときに、気づかないうちにライブ位置�
 
 2. 以下のリンクをクリック
 
-   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.17)
+   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.18)
 
 **コピペ用URL**  
-https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.17
+https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.18
 
 3. Userscript マネージャのインストール画面が出るので、「インストール」を選ぶ
 
@@ -40,6 +41,8 @@ https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mo
 手動操作は基本的に不要です。
 スクリプトを有効にしておけば、YouTube Live の再生中に自動で動作します。
 
+手動で再生速度を変更した場合は自動加速を解除し、選択した速度を保持します。
+
 ---
 
 ## 動作確認
@@ -51,7 +54,10 @@ YTLiveMinimumLatency.getStatus()
 ```
 
 `reason` が `accelerating-started`、`accelerating-continued`、`accelerating-rate-adjusted`、`accelerating-started-buffer-fallback`、`accelerating-continued-buffer-fallback` などになっていれば、加速判定中です。
-`cooldown-active`、`starvation-cooldown-started`、`acceleration-stopped-buffer-rate-cap-fallback` などの場合は、バッファ不足を避けるために加速を止めています。
+
+`acceleration-cooldown`、`acceleration-cooldown-buffer-fallback`、`starvation-cooldown-started`、`acceleration-stopped-buffer-rate-cap-fallback` などの場合は、再加速を待っているか、バッファ保護により加速を止めています。
+
+`manual-playback-rate-preserved` は、ユーザーが再生速度を変更したため自動加速を解除し、その速度を保持した状態です。
 
 実際の再生速度は以下で確認できます。
 
@@ -85,8 +91,10 @@ document.querySelector('video').playbackRate
 | 5-10秒  | 1.15x   | 中程度の遅れに対応 |
 | 10秒以上 | 1.25x   | 大きな遅れに対応 |
 
-YouTube の環境によっては Live Latency が直接取得できないため、Buffer Health を使って補助判定します。
-また、利用可能な再生速度と現在のバッファ量に応じて、実際に適用する速度を安全側へ丸めます。
+YouTube の環境によっては Live Latency が直接取得できないため、通常のライブ配信と判定できる場合に限り Buffer Health を補助判定として使います。
+DVRやPremiereなどでは、Live Latencyを取得できない状態からBuffer Healthだけで追いつこうとしません。
+
+利用可能な再生速度と現在のバッファ量に応じて、バッファ上限を超えない範囲で実際に適用する速度を選びます。
 
 ### ポーリング間隔の動的調整
 
@@ -150,12 +158,14 @@ LICENSE
 * バッファが少ない場合は、加速しないようにしています。
 * ライブ位置からの遅れが小さい場合は、加速しません。
 * 視聴者が手動で再生速度を変えている場合は、その操作を優先します。
+* DVRやPremiereでLive Latencyを取得できない場合、Buffer Healthだけでは加速しません。
 
 ### 加速が停止した場合
 
 * ライブ位置に追いつくと、自動で通常速度に戻ります。
 * バッファが不足すると、再生を優先するため加速を停止します。
 * 読み込み待ちが発生した場合は、短いクールダウン後に再判定します。
+* 手動で再生速度を変更した場合は、自動加速を解除してその速度を保持します。
 * ライブ配信が終了した場合も加速が停止します。
 
 ---
@@ -169,6 +179,17 @@ YouTube 側の仕様変更により、動作しなくなったり、配信によ
 
 ---
 
+## v0.1.0-mod.18 の改善点
+
+### 修正
+* **手動再生速度を保持**: 自動加速中にユーザーが速度を変更した場合、`1.0x` へ戻さず選択した速度を維持
+* **Buffer Health fallbackを限定**: Live Latency取得不能時のBuffer Healthだけによる加速は通常ライブのみ許可し、DVR / Premiereでの誤加速を抑制
+* **Premiere閾値を安全側へ変更**: Premiereの遅延閾値を `15秒` に変更
+* **再生速度丸めを整理**: バッファ量から決まる最大速度を超えない候補だけから再生速度を選択
+* **不要コード整理**: 未使用定数と旧レート丸めhelperを削除
+
+---
+
 ## v0.1.0-mod.17 の改善点
 
 ### 修正
@@ -177,10 +198,22 @@ YouTube 側の仕様変更により、動作しなくなったり、配信によ
 * **読み込み待ちイベントへの対応**: `waiting` / `stalled` 検出時に加速を止め、短いクールダウンを挟んでから再判定
 * **Buffer Health fallback の安全化**: Live Latency が取得できない場合も固定 `1.15x` ではなく、バッファ量に応じた安全な速度を使うように変更
 
-### 継続機能
-* **段階的な加速レート**: 遅延の大きさに応じて 1.1x → 1.15x → 1.25x に自動調整
-* **加速中の動的レート調整**: 遅延やバッファ量が変化した場合、その場で安全なレートに変更
-* **動的ポーリング間隔**: 通常(60秒) / 加速中(0.5秒) / バッファ低下時(2秒)
+---
+
+## v0.1.0-mod.16 の改善点
+
+### 修正
+* **加速振動を抑制**: 最低加速時間、開始・停止のヒステリシス、停止後クールダウンを導入
+
+---
+
+## v0.1.0-mod.15 の改善点
+
+### 修正
+* **再生速度丸めを改善**: 非対応レートが通常速度へ丸められて加速できないケースを修正
+* **ページ遷移時の速度復元を修正**: 状態クリア前に通常速度へ戻すよう変更
+* **Buffer fallbackの速度正規化**: fallback時も利用可能な再生速度へ合わせるよう変更
+* **非視聴ページの高頻度ポーリングを抑制**: 500ms再試行をwatch/liveページに限定
 
 ---
 
@@ -191,13 +224,6 @@ YouTube 側の仕様変更により、動作しなくなったり、配信によ
 * **初期化タイミングを改善**: `document-start` で起動し、プレイヤーや video 要素が未準備の間は短い間隔で再試行
 * **YouTube内遷移の後始末を強化**: `yt-navigate-start` や video 要素差し替え時に古いリスナーを外し、状態をリセット
 
-### 継続機能
-* **段階的な加速レート**: 遅延の大きさに応じて 1.1x → 1.15x → 1.25x に自動調整
-* **加速中の動的レート調整**: 遅延が変化した場合、その場で最適なレートに変更
-* **DOM クエリキャッシング**: 不要な DOM 操作を削減（キャッシュ有効期限: 100ms）
-* **動的ポーリング間隔**: 通常(60秒) / 加速中(0.5秒) / バッファ低下時(2秒)
-* **メモリリーク防止**: イベントリスナーの適切なクリーンアップ、ページ離脱時のタイマークリア
-
 ---
 
 ## v0.1.0-mod.13 の改善点
@@ -205,13 +231,6 @@ YouTube 側の仕様変更により、動作しなくなったり、配信によ
 ### 修正
 * **段階的な加速レート選択を修正**: 遅延が大きい場合に 1.15x / 1.25x へ到達するように変更
 * **加速判定を実遅延基準へ変更**: バッファ量を遅延に加算せず、実際のライブ遅延を主軸に判定
-
-### 継続機能
-* **段階的な加速レート**: 遅延の大きさに応じて 1.1x → 1.15x → 1.25x に自動調整
-* **加速中の動的レート調整**: 遅延が変化した場合、その場で最適なレートに変更
-* **DOM クエリキャッシング**: 不要な DOM 操作を削減（キャッシュ有効期限: 100ms）
-* **動的ポーリング間隔**: 通常(60秒) / 加速中(0.5秒) / バッファ低下時(2秒)
-* **メモリリーク防止**: イベントリスナーの適切なクリーンアップ、ページ離脱時のタイマークリア
 
 ---
 
