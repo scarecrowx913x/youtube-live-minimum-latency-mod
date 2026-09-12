@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.19
+// @version      0.1.0-mod.20
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -24,6 +24,11 @@
  *   - This script only runs on youtube.com.
  *   - It does not use external network requests.
  *   - It does not store personal data.
+ *
+ * v0.1.0-mod.20 Changes:
+ *   - Reset video-scoped acceleration/cooldown state across SPA navigation.
+ *   - Clean old video listeners even when URL polling is the navigation fallback.
+ *   - Detect disconnected/replaced video elements from the existing 1s URL watcher.
  *
  * v0.1.0-mod.19 Changes:
  *   - Keep low-buffer recovery polling fast after acceleration stops.
@@ -112,6 +117,7 @@
 
   const state = {
     timerId: null,
+    urlWatchTimerId: null,
     currentTickMs: null,
     lastUrl: location.href,
     accelerating: false,
@@ -973,27 +979,31 @@
     tick();
   }
 
-  function handleNavigateStart() {
-    cleanupVideoListeners();
-    if (state.accelerating) {
-      const player = getPlayer();
-      const video = getVideo(player);
-      if (player && video) {
-        setPlaybackRate(player, video, CONFIG.normalRate);
-      }
-      state.accelerating = false;
-      state.accelerationStartedAt = 0;
-      state.lastAccelerationStoppedAt = 0;
+  function resetVideoScopedState() {
+    state.accelerating = false;
+    state.accelerationStartedAt = 0;
+    state.lastAccelerationStoppedAt = 0;
+    state.lastRequestedRate = null;
+    state.lastRateSetAt = 0;
+  }
+
+  function cleanupForNavigation() {
+    const previousVideo = state.currentVideo;
+    if (state.accelerating && previousVideo) {
+      setVideoPlaybackRate(previousVideo, CONFIG.normalRate);
     }
+
+    cleanupVideoListeners();
+    resetVideoScopedState();
     invalidateCaches();
   }
 
-  function resetForNavigation() {
-    const player = getPlayer();
-    const video = getVideo(player);
+  function handleNavigateStart() {
+    cleanupForNavigation();
+  }
 
-    stopAcceleration(player, video, 'navigation');
-    invalidateCaches();
+  function resetForNavigation() {
+    cleanupForNavigation();
     state.lastUrl = location.href;
     startLoop();
   }
@@ -1002,9 +1012,16 @@
     document.addEventListener('yt-navigate-start', handleNavigateStart, false);
     document.addEventListener('yt-navigate-finish', resetForNavigation, false);
 
-    window.setInterval(() => {
+    state.urlWatchTimerId = window.setInterval(() => {
       if (state.lastUrl !== location.href) {
         resetForNavigation();
+        return;
+      }
+
+      if (state.currentVideo?.isConnected === false) {
+        cleanupVideoListeners();
+        invalidateCaches();
+        tick();
       }
     }, 1000);
   }
@@ -1013,6 +1030,9 @@
     cleanupVideoListeners();
     if (state.timerId) {
       clearInterval(state.timerId);
+    }
+    if (state.urlWatchTimerId) {
+      clearInterval(state.urlWatchTimerId);
     }
   });
 
