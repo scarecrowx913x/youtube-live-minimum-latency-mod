@@ -2,7 +2,7 @@
 // @name         YouTube Live Minimum Latency - Modified
 // @description  YouTube Live の遅延を検出し、一時的に再生速度を上げてライブ位置へ追いつきやすくします。
 // @namespace    https://github.com/scarecrowx913x/youtube-live-minimum-latency-mod
-// @version      0.1.0-mod.18
+// @version      0.1.0-mod.19
 // @author       Sigsign (original concept), modified by scarecrowx913x
 // @license      MIT
 // @match        https://www.youtube.com/*
@@ -24,6 +24,10 @@
  *   - This script only runs on youtube.com.
  *   - It does not use external network requests.
  *   - It does not store personal data.
+ *
+ * v0.1.0-mod.19 Changes:
+ *   - Keep low-buffer recovery polling fast after acceleration stops.
+ *   - Avoid forcing the idle polling interval from stopAcceleration().
  *
  * v0.1.0-mod.18 Changes:
  *   - Preserve user-selected playback rates when manual rate changes are detected.
@@ -552,7 +556,6 @@
       state.accelerating = false;
       state.accelerationStartedAt = 0;
       state.lastAccelerationStoppedAt = Date.now();
-      updateTickInterval(null);
       log('normal speed', reason);
     } else {
       log('failed to return normal speed', reason);
@@ -642,6 +645,7 @@
         actualPlaybackRateAfter: getActualPlaybackRate(video),
         playerPlaybackRateAfter: getPlayerPlaybackRate(player),
       });
+      updateTickInterval(status.bufferSec);
       return;
     }
 
@@ -658,6 +662,7 @@
         actualPlaybackRateAfter: getActualPlaybackRate(video),
         playerPlaybackRateAfter: getPlayerPlaybackRate(player),
       });
+      updateTickInterval(status.bufferSec);
       return;
     }
 
@@ -937,6 +942,7 @@
         actualPlaybackRateAfter: getActualPlaybackRate(video),
         playerPlaybackRateAfter: getPlayerPlaybackRate(player),
       });
+      updateTickInterval(bufferSec);
       return;
     }
 
