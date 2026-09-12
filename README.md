@@ -22,10 +22,10 @@ YouTube Live を見ているときに、気づかないうちにライブ位置�
 
 2. 以下のリンクをクリック
 
-   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.18)
+   👉 [インストールはこちら](https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.19)
 
 **コピペ用URL**  
-https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.18
+https://raw.githubusercontent.com/scarecrowx913x/youtube-live-minimum-latency-mod/main/youtube-live-minimum-latency.user.js?install=0.1.0-mod.19
 
 3. Userscript マネージャのインストール画面が出るので、「インストール」を選ぶ
 
@@ -110,6 +110,7 @@ DVRやPremiereなどでは、Live Latencyを取得できない状態からBuffer
 
 低遅延ライブではバッファが少ない状態で加速すると、再生位置がバッファ末尾に追いついて読み込み待ちになることがあります。
 このスクリプトは、バッファ量が少ないときは加速率を抑え、`waiting` や `stalled` などの読み込み待ちイベントを検出した場合は一時的に加速を停止します。
+低バッファで加速を停止した直後は、バッファ回復を追うため約2秒間隔で再判定します。
 
 ### パフォーマンス最適化
 
@@ -164,6 +165,7 @@ LICENSE
 
 * ライブ位置に追いつくと、自動で通常速度に戻ります。
 * バッファが不足すると、再生を優先するため加速を停止します。
+* 低バッファで停止した直後は、バッファ回復を確認するため約2秒間隔で再判定します。
 * 読み込み待ちが発生した場合は、短いクールダウン後に再判定します。
 * 手動で再生速度を変更した場合は、自動加速を解除してその速度を保持します。
 * ライブ配信が終了した場合も加速が停止します。
@@ -176,6 +178,15 @@ LICENSE
 YouTube 側の仕様変更により、動作しなくなったり、配信によって挙動が変わったりする場合があります。
 
 また、ライブ配信の種類や遅延設定によって、必ずライブ位置へ追いつけるとは限りません。
+
+---
+
+## v0.1.0-mod.19 の改善点
+
+### 修正
+* **低バッファ停止後の再判定を高速化**: 加速停止時に一律60秒ポーリングへ戻さず、低バッファ状態では約2秒間隔で回復を追跡
+* **停止処理の責務を整理**: `stopAcceleration()` からポーリング間隔変更を外し、各判定経路で現在のバッファ量に応じて間隔を決定
+* **回帰テスト追加**: 通常加速とBuffer-only fallbackの低バッファ停止後が2秒ポーリングになることを自動テスト
 
 ---
 
